@@ -7,6 +7,7 @@ struct SidebarView: View {
     var onSelectSession: (UUID) -> Void
     var onNewProject: () -> Void
     var onNewSession: (UUID) -> Void
+    var onNewClaudeSession: (UUID) -> Void
     var onDeleteProject: (UUID) -> Void
     var onCloseSession: (UUID) -> Void
     var onRestartSession: (UUID) -> Void
@@ -41,6 +42,7 @@ struct SidebarView: View {
                             isSelected: isActive,
                             onSelect: { onSelectProject(project.id) },
                             onNewSession: { onNewSession(project.id) },
+                            onNewClaudeSession: { onNewClaudeSession(project.id) },
                             onDelete: { onDeleteProject(project.id) }
                         )
 
@@ -85,6 +87,7 @@ private struct ProjectRow: View {
     let isSelected: Bool
     var onSelect: () -> Void
     var onNewSession: () -> Void
+    var onNewClaudeSession: () -> Void
     var onDelete: () -> Void
 
     @State private var isEditing = false
@@ -167,7 +170,8 @@ private struct ProjectRow: View {
         .contextMenu {
             Button("Rename") { startRename() }
             Divider()
-            Button("New Session") { onNewSession() }
+            Button("Launch Claude Code") { onNewClaudeSession() }
+            Button("New Shell Session") { onNewSession() }
             Divider()
             Button("Delete Project", role: .destructive) { onDelete() }
         }

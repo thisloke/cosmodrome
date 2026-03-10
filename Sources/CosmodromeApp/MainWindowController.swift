@@ -114,6 +114,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
                           let project = self.projectStore.projects.first(where: { $0.id == projectId }) else { return }
                     self.addSession(to: project)
                 },
+                onNewClaudeSession: { [weak self] projectId in
+                    guard let self,
+                          let project = self.projectStore.projects.first(where: { $0.id == projectId }) else { return }
+                    self.addClaudeSession(to: project)
+                },
                 onDeleteProject: { [weak self] id in
                     guard let self,
                           let project = self.projectStore.projects.first(where: { $0.id == id }) else { return }
@@ -267,26 +272,45 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
     }
 
     func addNewProject() {
-        let homeDir = FileManager.default.homeDirectoryForCurrentUser.path
-        let session = Session(
-            name: "Shell",
-            command: "/bin/zsh",
-            cwd: homeDir
-        )
-        let project = Project(
-            name: "Project \(projectStore.projects.count + 1)",
-            sessions: [session]
-        )
-        projectStore.addProject(project)
-        projectStore.setActiveProject(id: project.id)
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = false
+        panel.message = "Select a project directory"
+        panel.prompt = "Open Project"
 
-        do {
-            try sessionManager.startSession(session)
-        } catch {
-            FileHandle.standardError.write("[Cosmodrome] Failed to start session: \(error)\n".data(using: .utf8)!)
+        panel.begin { [weak self] response in
+            guard let self, response == .OK, let url = panel.url else { return }
+            let dirPath = url.path
+            let projectName = url.lastPathComponent
+
+            // Check if project already exists
+            if let existing = self.projectStore.projects.first(where: { $0.rootPath == dirPath }) {
+                self.selectProject(id: existing.id)
+                return
+            }
+
+            let session = Session(
+                name: "Shell",
+                command: "/bin/zsh",
+                cwd: dirPath
+            )
+            let project = Project(
+                name: projectName,
+                rootPath: dirPath,
+                sessions: [session]
+            )
+            projectStore.addProject(project)
+            projectStore.setActiveProject(id: project.id)
+
+            do {
+                try self.sessionManager.startSession(session)
+            } catch {
+                FileHandle.standardError.write("[Cosmodrome] Failed to start session: \(error)\n".data(using: .utf8)!)
+            }
+
+            self.refreshTerminalView()
         }
-
-        refreshTerminalView()
     }
 
     func openProject(at url: URL) {
@@ -337,6 +361,30 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
         // Rebuild sessions array so the new session is visible to the renderer
         refreshTerminalView()
         // Open new session in focus mode (like a new tab)
+        focusSession(session.id)
+    }
+
+    func addClaudeSession(to project: Project) {
+        let homeDir = FileManager.default.homeDirectoryForCurrentUser.path
+        let cwd = project.rootPath ?? homeDir
+        let claudeCount = project.sessions.filter { $0.isAgent && $0.agentType == "claude" }.count
+        let session = Session(
+            name: claudeCount == 0 ? "Claude Code" : "Claude Code \(claudeCount + 1)",
+            command: "claude",
+            arguments: [],
+            cwd: cwd,
+            isAgent: true,
+            agentType: "claude"
+        )
+        project.sessions.append(session)
+
+        do {
+            try sessionManager.startSession(session)
+        } catch {
+            FileHandle.standardError.write("[Cosmodrome] Failed to start Claude Code: \(error)\n".data(using: .utf8)!)
+        }
+
+        refreshTerminalView()
         focusSession(session.id)
     }
 
@@ -415,16 +463,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
         })
 
         // New session / project
-        actions.append(PaletteAction("New Session", icon: "plus.rectangle") { [weak self] in
+        actions.append(PaletteAction("Launch Claude Code", subtitle: "Cmd+Shift+C", icon: "cpu") { [weak self] in
+            if let project = self?.projectStore.activeProject {
+                self?.addClaudeSession(to: project)
+            }
+        })
+        actions.append(PaletteAction("New Shell Session", subtitle: "Cmd+T", icon: "plus.rectangle") { [weak self] in
             if let project = self?.projectStore.activeProject {
                 self?.addSession(to: project)
             }
         })
-        actions.append(PaletteAction("New Project", icon: "folder.badge.plus") { [weak self] in
+        actions.append(PaletteAction("New Project...", subtitle: "Cmd+Shift+T", icon: "folder.badge.plus") { [weak self] in
             self?.addNewProject()
-        })
-        actions.append(PaletteAction("Open Project...", icon: "folder") { [weak self] in
-            self?.showOpenProjectPanel()
         })
 
         // Framework-detected dev server actions
@@ -738,6 +788,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
 
         case .newProject:
             addNewProject()
+
+        case .newClaudeSession:
+            if let project = projectStore.activeProject {
+                addClaudeSession(to: project)
+            }
 
         case .jumpNextNeedsInput:
             let current = terminalContentView.focusedSessionId

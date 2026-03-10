@@ -22,6 +22,7 @@ final class KeybindingManager {
         case toggleFocus
         case toggleActivityLog
         case newSession, closeSession, newProject
+        case newClaudeSession
         case jumpNextNeedsInput
         case commandPalette
         case enterNormalMode
@@ -79,6 +80,9 @@ final class KeybindingManager {
         // Cmd+L: toggle activity log
         normalBindings[Binding(key: 37, modifiers: .command)] = .toggleActivityLog
 
+        // Cmd+Shift+C: launch Claude Code in current project
+        normalBindings[Binding(key: 8, modifiers: [.command, .shift])] = .newClaudeSession
+
         // Cmd+]: next project, Cmd+[: previous project
         normalBindings[Binding(key: 30, modifiers: .command)] = .projectNext
         normalBindings[Binding(key: 33, modifiers: .command)] = .projectPrevious
@@ -102,6 +106,7 @@ final class KeybindingManager {
         commandBindings[Binding(key: 7, modifiers: [])] = .closeSession       // x
         commandBindings[Binding(key: 35, modifiers: [])] = .commandPalette    // p
         commandBindings[Binding(key: 3, modifiers: [])] = .toggleFocus        // f
+        commandBindings[Binding(key: 8, modifiers: [])] = .newClaudeSession    // c
         commandBindings[Binding(key: 44, modifiers: [])] = .commandPalette    // /
         commandBindings[Binding(key: 53, modifiers: [])] = .enterNormalMode   // Escape
 

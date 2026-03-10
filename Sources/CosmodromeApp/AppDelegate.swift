@@ -3,6 +3,13 @@ import Core
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowController: MainWindowController?
+    private var dashboardController: DashboardWindowController?
+    private let dashboardMode: Bool
+
+    init(dashboardMode: Bool = false) {
+        self.dashboardMode = dashboardMode
+        super.init()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Critical: without this, a CLI-launched app behaves as a background
@@ -12,9 +19,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AgentNotifications.requestPermission()
         setupMenu()
 
-        windowController = MainWindowController()
-        windowController?.showWindow(nil)
-        windowController?.window?.makeKeyAndOrderFront(nil)
+        if dashboardMode {
+            dashboardController = DashboardWindowController(dashboard: true)
+            dashboardController?.showWindow(nil)
+            dashboardController?.window?.makeKeyAndOrderFront(nil)
+        } else {
+            windowController = MainWindowController()
+            windowController?.showWindow(nil)
+            windowController?.window?.makeKeyAndOrderFront(nil)
+        }
 
         if #available(macOS 14.0, *) {
             NSApp.activate()
@@ -22,12 +35,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.activate(ignoringOtherApps: true)
         }
 
-        // Intercept key events for global keybindings
-        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if self?.windowController?.handleKeyEvent(event) == true {
-                return nil
+        // Intercept key events for global keybindings (terminal mode only)
+        if !dashboardMode {
+            NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                if self?.windowController?.handleKeyEvent(event) == true {
+                    return nil
+                }
+                return event
             }
-            return event
         }
     }
 

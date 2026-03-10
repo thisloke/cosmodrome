@@ -35,6 +35,12 @@ public func spawnPTY(
     if pid == 0 {
         // Child process
         var env = ProcessInfo.processInfo.environment
+
+        // Strip ALL Claude Code env vars so each session is a fresh instance
+        for key in env.keys where key.hasPrefix("CLAUDE") {
+            env.removeValue(forKey: key)
+        }
+
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
         env["TERM_PROGRAM"] = "Cosmodrome"
