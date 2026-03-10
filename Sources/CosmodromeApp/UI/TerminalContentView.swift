@@ -203,17 +203,10 @@ final class TerminalContentView: NSView {
                 )
             }
         } else {
-            // No mouse reporting — send arrow keys as fallback
-            let arrow: Data = scrollUp
-                ? Data([0x1B, 0x5B, 0x41])  // Up
-                : Data([0x1B, 0x5B, 0x42])  // Down
-            var data = Data()
-            for _ in 0..<lines { data.append(arrow) }
-            NotificationCenter.default.post(
-                name: .cosmodromePasteData,
-                object: nil,
-                userInfo: ["data": data, "fd": pair.session.ptyFD]
-            )
+            // No mouse reporting — do NOT send arrow keys (that would
+            // cycle through shell/Claude Code history instead of scrolling).
+            // TODO: implement scrollback viewport offset for true scroll.
+            // For now, swallow the event so it doesn't leak to parent views.
         }
     }
 
