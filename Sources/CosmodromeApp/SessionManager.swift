@@ -10,6 +10,7 @@ final class SessionManager {
     let portDetector = PortDetector()
     private var onSessionDirty: (() -> Void)?
     private var lastStatusParse: [UUID: Date] = [:]
+    private var lastPromptScan: [UUID: Date] = [:]
     /// Called on main thread when the session list changes structurally (exit, restart).
     var onSessionListChanged: (() -> Void)?
     private var recorders: [UUID: AsciicastRecorder] = [:]
@@ -169,6 +170,8 @@ final class SessionManager {
 
                         // Parse Claude Code status bar (throttled)
                         self?.updateStatusLine(session: session, backend: backend)
+                        // Scan terminal buffer for permission prompts (throttled, 300ms)
+                        self?.scanForPromptIfNeeded(session: session, backend: backend)
 
                         // Append events to project's activity log
                         if let project = self?.findProject(for: session) {
@@ -333,6 +336,7 @@ final class SessionManager {
         session.detectedPorts = []
         stateLock.lock()
         lastStatusParse.removeValue(forKey: session.id)
+        lastPromptScan.removeValue(forKey: session.id)
         detectors.removeValue(forKey: session.id)
         lastAgentCheck.removeValue(forKey: session.id)
         stateLock.unlock()
@@ -507,6 +511,7 @@ final class SessionManager {
                         session.agentState = newState
                         if model != session.agentModel { session.agentModel = model }
                         self?.updateStatusLine(session: session, backend: backend)
+                        self?.scanForPromptIfNeeded(session: session, backend: backend)
 
                         if let project = self?.findProject(for: session) {
                             project.activityLog.append(contentsOf: events)
@@ -587,14 +592,15 @@ final class SessionManager {
 
         let info = Self.parseStatusLine(from: backend)
         Self.debugLog("updateStatusLine: session=\(session.name) ctx=\(info.context ?? "nil") model=\(info.model ?? "nil") mode=\(info.mode ?? "nil") effort=\(info.effort ?? "nil") cost=\(info.cost ?? "nil")")
-        if info.context != session.agentContext { session.agentContext = info.context }
-        if info.mode != session.agentMode { session.agentMode = info.mode }
-        if info.effort != session.agentEffort { session.agentEffort = info.effort }
-        if info.cost != session.agentCost {
-            session.agentCost = info.cost
-            // Parse cost string and update stats (e.g. "$0.34" → 0.34)
-            if let costStr = info.cost, let cost = Self.parseCostValue(costStr) {
-                session.stats.recordCost(cost)
+        // Only update fields with non-nil values — don't erase good data when
+        // a parse fails (e.g. during a Claude Code TUI redraw).
+        if let ctx = info.context, ctx != session.agentContext { session.agentContext = ctx }
+        if let mode = info.mode, mode != session.agentMode { session.agentMode = mode }
+        if let effort = info.effort, effort != session.agentEffort { session.agentEffort = effort }
+        if let cost = info.cost, cost != session.agentCost {
+            session.agentCost = cost
+            if let costVal = Self.parseCostValue(cost) {
+                session.stats.recordCost(costVal)
             }
         }
         if let model = info.model, model != session.agentModel {
@@ -733,6 +739,95 @@ final class SessionManager {
             .replacingOccurrences(of: "$", with: "")
             .replacingOccurrences(of: ",", with: "")
         return Double(cleaned)
+    }
+
+    // MARK: - Terminal Buffer Prompt Scanning
+
+    /// Patterns that indicate a permission/input prompt is visible on screen.
+    /// These are matched against the rendered terminal buffer (clean text),
+    /// which is much more reliable than scanning raw PTY output.
+    private static let promptPatterns: [String] = [
+        #"(?i)Do you want to allow"#,
+        #"(?i)Allow for this session"#,
+        #"(?i)Always allow"#,
+        #"(?i)Allow\s+once"#,
+        #"(?i)Allow\s+\w+.*\?"#,
+        #"(?i)approve this"#,
+        #"\[y/n\]|\[Y/n\]"#,
+        #"\(Y\)es.*\(N\)o"#,
+    ]
+
+    /// Scan the rendered terminal buffer for permission prompt patterns.
+    /// This is more reliable than scanning raw PTY output because TUI apps
+    /// (like Claude Code) use cursor positioning, and after VT parsing the
+    /// buffer contains the actual visible screen text.
+    static func scanForInputPrompt(from backend: TerminalBackend) -> Bool {
+        backend.lock()
+        let rows = backend.rows
+        let cols = backend.cols
+
+        // Read all rows except the bottom 3 (status bar area) to avoid
+        // matching patterns in the status line (e.g., "permission" mode label).
+        var text = ""
+        let scanEnd = max(0, rows - 3)
+        for row in 0..<scanEnd {
+            for col in 0..<cols {
+                let cell = backend.cellAtBottom(row: row, col: col)
+                let cp = cell.codepoint
+                if cp >= 32 && cp < 0x110000 {
+                    text.append(Character(Unicode.Scalar(cp)!))
+                } else {
+                    text.append(" ")
+                }
+            }
+            text.append("\n")
+        }
+        backend.unlock()
+
+        for pattern in promptPatterns {
+            if text.range(of: pattern, options: .regularExpression) != nil {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Check the terminal buffer for input prompts (throttled at 300ms).
+    /// Called from the onOutput callback alongside updateStatusLine().
+    private func scanForPromptIfNeeded(session: Session, backend: TerminalBackend) {
+        guard session.isAgent else { return }
+
+        let now = Date()
+        // Prompt scan runs more frequently than status parsing (300ms vs 2s)
+        // because permission prompts are time-sensitive.
+        if let last = lastPromptScan[session.id], now.timeIntervalSince(last) < 0.3 {
+            return
+        }
+        lastPromptScan[session.id] = now
+
+        let promptDetected = Self.scanForInputPrompt(from: backend)
+
+        if promptDetected {
+            if session.agentState != .needsInput {
+                // Transition to needsInput
+                session.agentState = .needsInput
+                session.hasUnreadNotification = true
+                if let project = findProject(for: session) {
+                    AgentNotifications.notifyAgentState(project: project, session: session)
+                }
+            }
+        } else if session.agentState == .needsInput {
+            // Prompt is no longer visible — the user likely approved it.
+            // Let the raw output detector handle the transition back to working/inactive.
+            // But if the detector is stuck on needsInput, clear it after confirming
+            // the prompt is gone from the buffer.
+            stateLock.lock()
+            let detector = detectors[session.id]
+            stateLock.unlock()
+            if let detector, detector.state != .needsInput {
+                session.agentState = detector.state
+            }
+        }
     }
 
     // MARK: - Private

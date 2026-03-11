@@ -47,8 +47,9 @@ public final class AgentDetector {
     /// Called on I/O thread when new output arrives.
     /// Performs state detection, model detection, and event extraction in one pass.
     public func analyze(lastOutput: UnsafeRawBufferPointer) {
-        // Convert last output to string (only last 2KB for efficiency)
-        let len = min(lastOutput.count, 2048)
+        // Convert last output to string (16KB to capture full TUI redraws —
+        // Claude Code screen updates can be 20-30KB with ANSI sequences).
+        let len = min(lastOutput.count, 16384)
         let start = lastOutput.count - len
         let slice = UnsafeRawBufferPointer(rebasing: lastOutput[start...])
         guard let text = String(bytes: slice, encoding: .utf8) else { return }
@@ -190,7 +191,9 @@ public final class AgentDetector {
         }
 
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
-        let lastLines = lines.suffix(5)
+        // Scan more lines (20) to catch prompts in TUI output where line
+        // structure is lost after ANSI stripping.
+        let lastLines = lines.suffix(20)
         let lastLine = lines.last.map(String.init) ?? ""
 
         var detected: AgentState?
@@ -213,7 +216,11 @@ public final class AgentDetector {
         guard let newState = detected, newState != state else { return }
 
         let now = Date()
-        guard now.timeIntervalSince(lastChange) >= debounce else { return }
+        // Skip debounce for needsInput — permission prompts are time-sensitive
+        // and we don't want to miss them due to a recent state transition.
+        if newState != .needsInput {
+            guard now.timeIntervalSince(lastChange) >= debounce else { return }
+        }
 
         state = newState
         lastChange = now
