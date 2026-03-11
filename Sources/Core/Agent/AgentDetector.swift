@@ -14,6 +14,8 @@ public final class AgentDetector {
 
     // When true, hook events have been received — suppress regex state detection
     private var hasHookData = false
+    private var lastHookEvent = Date.distantPast
+    private let hookTimeout: TimeInterval = 30
 
     // Subagent tracking
     private var activeSubagent: String?
@@ -114,13 +116,15 @@ public final class AgentDetector {
     public func ingestHookEvent(_ event: HookEvent) {
         hasHookData = true
 
+        lastHookEvent = Date()
+
         // Map hook events to agent state
         switch event.hookName {
         case "PreToolUse":
             state = .working
             lastChange = Date()
         case "Stop":
-            state = .needsInput
+            state = .inactive
             lastChange = Date()
         default:
             break
@@ -153,7 +157,14 @@ public final class AgentDetector {
 
     private func detectState(_ text: String) {
         // Hook events are authoritative — skip regex detection when hooks are active
-        guard !hasHookData else { return }
+        // But fall back to regex if no hook event received within timeout
+        if hasHookData {
+            if Date().timeIntervalSince(lastHookEvent) > hookTimeout {
+                hasHookData = false
+            } else {
+                return
+            }
+        }
 
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
         let lastLines = lines.suffix(5)

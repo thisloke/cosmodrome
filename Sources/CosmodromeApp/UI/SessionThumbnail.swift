@@ -191,37 +191,49 @@ struct SessionThumbnailView: View {
 
     /// Whether we have any Claude Code status info to display.
     private var hasStatusInfo: Bool {
-        session.agentContext != nil || session.agentMode != nil || session.agentCost != nil
+        session.agentContext != nil || session.agentMode != nil || session.agentCost != nil || session.agentEffort != nil
     }
 
-    /// Agent status row: context, mode, cost — replaces terminal preview for agent sessions.
+    /// Agent status row: context, model, effort, mode, cost.
     @ViewBuilder
     private var agentStatusRow: some View {
-        HStack(spacing: Spacing.sm) {
-            if let ctx = session.agentContext {
-                HStack(spacing: 2) {
-                    Image(systemName: "chart.bar.fill")
-                        .font(.system(size: 7))
-                    Text(ctx)
-                        .font(Typo.captionMono)
+        VStack(alignment: .leading, spacing: 3) {
+            // Line 1: context + model + effort
+            HStack(spacing: Spacing.xs) {
+                if let ctx = session.agentContext {
+                    HStack(spacing: 2) {
+                        Image(systemName: "chart.bar.fill")
+                            .font(.system(size: 7))
+                        Text(ctx)
+                            .font(Typo.captionMono)
+                    }
+                    .foregroundColor(DS.textSecondary)
                 }
-                .foregroundColor(DS.textSecondary)
+                if let effort = session.agentEffort {
+                    Text(effort)
+                        .font(Typo.captionMono)
+                        .foregroundColor(DS.textTertiary)
+                }
+                Spacer()
+                if let cost = session.agentCost {
+                    Text(cost)
+                        .font(Typo.captionMono)
+                        .foregroundColor(DS.textTertiary)
+                }
             }
+            // Line 2: permission mode badge
             if let mode = session.agentMode {
-                Text(mode)
-                    .font(Typo.caption)
-                    .foregroundColor(modeColor(mode))
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 1)
-                    .background(modeColor(mode).opacity(0.12))
-                    .cornerRadius(Radius.sm)
+                HStack(spacing: Spacing.xs) {
+                    Text(mode)
+                        .font(Typo.caption)
+                        .foregroundColor(modeColor(mode))
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(modeColor(mode).opacity(0.12))
+                        .cornerRadius(Radius.sm)
+                    Spacer()
+                }
             }
-            if let cost = session.agentCost {
-                Text(cost)
-                    .font(Typo.captionMono)
-                    .foregroundColor(DS.textTertiary)
-            }
-            Spacer()
         }
         .padding(.horizontal, Spacing.sm)
         .padding(.bottom, Spacing.sm)
@@ -230,6 +242,7 @@ struct SessionThumbnailView: View {
     private func modeColor(_ mode: String) -> Color {
         switch mode {
         case "Bypass": return DS.stateError
+        case "Accept Edits": return Color(red: 0.9, green: 0.6, blue: 0.2)
         case "Plan": return DS.stateNeedsInput
         case "Auto": return DS.stateWorking
         default: return DS.textSecondary

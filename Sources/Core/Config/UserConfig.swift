@@ -131,17 +131,23 @@ public struct UserConfig: Codable {
 
 public struct AppState: Codable {
     public var windowFrame: [Double]
+    public var windowZoomed: Bool
+    public var fontSize: Double?
     public var sidebarWidth: Double
     public var activeProjectId: String?
     public var projects: [ProjectStateEntry]
 
     public init(
         windowFrame: [Double] = [100, 100, 1200, 800],
+        windowZoomed: Bool = false,
+        fontSize: Double? = nil,
         sidebarWidth: Double = 200,
         activeProjectId: String? = nil,
         projects: [ProjectStateEntry] = []
     ) {
         self.windowFrame = windowFrame
+        self.windowZoomed = windowZoomed
+        self.fontSize = fontSize
         self.sidebarWidth = sidebarWidth
         self.activeProjectId = activeProjectId
         self.projects = projects

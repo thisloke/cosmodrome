@@ -363,6 +363,15 @@ final class TerminalContentView: NSView {
         }
     }
 
+    /// Change the terminal font size, invalidating glyph cache and recalculating layout.
+    func setFontSize(_ size: CGFloat) {
+        guard let renderer else { return }
+        renderer.fontManager.setFontSize(size)
+        renderer.atlas.clearCache()
+        updateLayout()
+        metalView.needsDisplay = true
+    }
+
     func toggleFocus() {
         guard let focusedId = focusedSessionId ?? sessions.first?.session.id else { return }
         layoutEngine.toggleFocus(sessionId: focusedId)

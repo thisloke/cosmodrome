@@ -111,6 +111,14 @@ public final class PTYMultiplexer {
         lock.unlock()
     }
 
+    /// Update the SessionIO for an already-registered fd (e.g., to add an AgentDetector).
+    /// The fd must already be registered — kqueue registration is not changed.
+    public func updateSession(fd: Int32, session: SessionIO) {
+        lock.lock()
+        sessions[fd] = session
+        lock.unlock()
+    }
+
     /// Send data to a PTY fd.
     public func send(to fd: Int32, data: Data) {
         writePTY(fd: fd, data: data)

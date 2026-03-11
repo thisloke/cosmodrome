@@ -46,6 +46,16 @@ final class GlyphAtlas {
         textures.last
     }
 
+    /// Clear all cached glyphs (call after font size change).
+    func clearCache() {
+        cache.removeAll()
+        textures.removeAll()
+        packX = 1
+        packY = 1
+        rowHeight = 0
+        textures.append(createAtlasTexture())
+    }
+
     // MARK: - Private
 
     private func createAtlasTexture() -> MTLTexture {

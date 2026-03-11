@@ -25,7 +25,8 @@ enum StatePersistence {
     static func save(
         window: NSWindow?,
         projectStore: ProjectStore,
-        sidebarWidth: CGFloat = 200
+        sidebarWidth: CGFloat = 200,
+        fontSize: CGFloat? = nil
     ) {
         // Ensure scrollback directory exists
         try? FileManager.default.createDirectory(
@@ -74,6 +75,7 @@ enum StatePersistence {
         }
 
         let frame = window?.frame ?? NSRect(x: 100, y: 100, width: 1200, height: 800)
+        let zoomed = window?.isZoomed ?? false
         let state = AppState(
             windowFrame: [
                 Double(frame.origin.x),
@@ -81,6 +83,8 @@ enum StatePersistence {
                 Double(frame.width),
                 Double(frame.height),
             ],
+            windowZoomed: zoomed,
+            fontSize: fontSize.map { Double($0) },
             sidebarWidth: Double(sidebarWidth),
             activeProjectId: projectStore.activeProjectId?.uuidString,
             projects: projectEntries

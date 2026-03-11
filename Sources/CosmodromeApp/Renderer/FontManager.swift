@@ -11,12 +11,59 @@ final class FontManager {
     }
 
     private var fonts: [CTFont] // [regular, bold, italic, boldItalic]
-    let cellMetrics: CellMetrics
-    let fontSize: CGFloat
+    private(set) var cellMetrics: CellMetrics
+    private(set) var fontSize: CGFloat
+    private let family: String
+    private let scale: CGFloat
+    private let lineHeight: CGFloat
+    let defaultFontSize: CGFloat
 
     init(family: String = "JetBrainsMono Nerd Font Mono", size: CGFloat = 13, scale: CGFloat = 2.0, lineHeight: CGFloat = 1.2) {
+        self.family = family
+        self.scale = scale
+        self.lineHeight = lineHeight
         self.fontSize = size
+        self.defaultFontSize = size
+
         let scaledSize = size * scale
+        let regular = CTFontCreateWithName(family as CFString, scaledSize, nil)
+
+        let bold = CTFontCreateCopyWithSymbolicTraits(
+            regular, scaledSize, nil, .boldTrait, .boldTrait
+        ) ?? regular
+
+        let italic = CTFontCreateCopyWithSymbolicTraits(
+            regular, scaledSize, nil, .italicTrait, .italicTrait
+        ) ?? regular
+
+        let boldItalic = CTFontCreateCopyWithSymbolicTraits(
+            regular, scaledSize, nil, [.boldTrait, .italicTrait], [.boldTrait, .italicTrait]
+        ) ?? bold
+
+        self.fonts = [regular, bold, italic, boldItalic]
+
+        let ascent = CTFontGetAscent(regular)
+        let descent = CTFontGetDescent(regular)
+        let leading = CTFontGetLeading(regular)
+
+        var advance = CGSize.zero
+        var glyph = CTFontGetGlyphWithName(regular, "M" as CFString)
+        CTFontGetAdvancesForGlyphs(regular, .default, &glyph, &advance, 1)
+
+        self.cellMetrics = CellMetrics(
+            width: ceil(advance.width),
+            height: ceil((ascent + descent + leading) * lineHeight),
+            baseline: round(ascent)
+        )
+    }
+
+    /// Update font size at runtime. Rebuilds all CTFonts and recalculates cell metrics.
+    func setFontSize(_ newSize: CGFloat) {
+        let clamped = min(max(newSize, 8), 32)
+        guard clamped != fontSize else { return }
+        fontSize = clamped
+
+        let scaledSize = clamped * scale
         let regular = CTFontCreateWithName(family as CFString, scaledSize, nil)
 
         let bold = CTFontCreateCopyWithSymbolicTraits(

@@ -13,6 +13,12 @@ final class SessionManager {
     /// Called on main thread when the session list changes structurally (exit, restart).
     var onSessionListChanged: (() -> Void)?
     private var recorders: [UUID: AsciicastRecorder] = [:]
+    /// Detectors stored by session ID — accessible for hook event forwarding.
+    private(set) var detectors: [UUID: AgentDetector] = [:]
+    /// Throttle for runtime agent detection in shell sessions.
+    private var lastAgentCheck: [UUID: Date] = [:]
+    /// Lock for dicts accessed from both I/O and main threads.
+    private let stateLock = NSLock()
 
     /// Socket path for the hook server — injected into spawned sessions' environment.
     var hookSocketPath: String?
@@ -101,13 +107,31 @@ final class SessionManager {
             }
         }
 
-        let detector: AgentDetector? = session.isAgent
-            ? AgentDetector(
+        // Create detector: explicit agent flag, or auto-detect from command name
+        let detector: AgentDetector?
+        if session.isAgent {
+            detector = AgentDetector(
                 agentType: session.agentType ?? "claude",
                 sessionId: session.id,
                 sessionName: session.name
             )
-            : nil
+        } else if let detectedType = AgentPatterns.detectType(from: session.command) {
+            session.isAgent = true
+            session.agentType = detectedType
+            detector = AgentDetector(
+                agentType: detectedType,
+                sessionId: session.id,
+                sessionName: session.name
+            )
+        } else {
+            detector = nil
+        }
+
+        if let detector {
+            stateLock.lock()
+            detectors[session.id] = detector
+            stateLock.unlock()
+        }
 
         session.backend = backend
         session.ptyFD = result.fd
@@ -125,6 +149,10 @@ final class SessionManager {
             backend: backend,
             agentDetector: detector,
             onOutput: { [weak self] in
+                // Check detector from dict (may be added at runtime via upgrade)
+                self?.stateLock.lock()
+                let detector = self?.detectors[sessionId]
+                self?.stateLock.unlock()
                 if let detector {
                     let newState = detector.state
                     let oldState = session.agentState
@@ -186,6 +214,9 @@ final class SessionManager {
                             }
                         }
                     }
+                } else {
+                    // No detector yet — check if an agent started in this shell session
+                    self?.checkForAgentStartup(session: session, backend: backend)
                 }
                 DispatchQueue.main.async {
                     onDirty()
@@ -195,7 +226,10 @@ final class SessionManager {
                 self?.handleSessionExit(session)
             },
             onRawOutput: { [weak self] bytes in
-                self?.recorders[sessionId]?.recordOutput(bytes)
+                self?.stateLock.lock()
+                let recorder = self?.recorders[sessionId]
+                self?.stateLock.unlock()
+                recorder?.recordOutput(bytes)
             }
         )
 
@@ -285,11 +319,16 @@ final class SessionManager {
         session.agentModel = nil
         session.agentContext = nil
         session.agentMode = nil
+        session.agentEffort = nil
         session.agentCost = nil
         session.taskStartedAt = nil
         session.filesChangedInTask = []
         session.detectedPorts = []
+        stateLock.lock()
         lastStatusParse.removeValue(forKey: session.id)
+        detectors.removeValue(forKey: session.id)
+        lastAgentCheck.removeValue(forKey: session.id)
+        stateLock.unlock()
     }
 
     /// Start all auto-start sessions in a project.
@@ -346,6 +385,157 @@ final class SessionManager {
         recorders[session.id] != nil
     }
 
+    // MARK: - Runtime Agent Detection
+
+    /// Check if an agent has started in a shell session (called from I/O thread via onOutput).
+    /// Throttled to every 2 seconds to avoid overhead.
+    private func checkForAgentStartup(session: Session, backend: TerminalBackend) {
+        stateLock.lock()
+        // Already upgraded — skip
+        if detectors[session.id] != nil {
+            stateLock.unlock()
+            return
+        }
+        let now = Date()
+        if let last = lastAgentCheck[session.id], now.timeIntervalSince(last) < 2.0 {
+            stateLock.unlock()
+            return
+        }
+        lastAgentCheck[session.id] = now
+        stateLock.unlock()
+
+        // Read last few lines from the terminal buffer
+        backend.lock()
+        let rows = backend.rows
+        let cols = backend.cols
+        var text = ""
+        for row in max(0, rows - 5)..<rows {
+            for col in 0..<cols {
+                let cell = backend.cell(row: row, col: col)
+                let cp = cell.codepoint
+                if cp >= 32 && cp < 0x10000 {
+                    text.append(Character(Unicode.Scalar(cp)!))
+                } else {
+                    text.append(" ")
+                }
+            }
+            text.append("\n")
+        }
+        backend.unlock()
+
+        // Detect agent startup signatures — use spinner chars (reliable, no false positives)
+        let agentType: String?
+        if text.range(of: #"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]"#, options: .regularExpression) != nil {
+            agentType = "claude"
+        } else if text.range(of: #"(?i)\baider\s*>"#, options: .regularExpression) != nil {
+            agentType = "aider"
+        } else if text.range(of: #"(?i)\bcodex\s*>"#, options: .regularExpression) != nil {
+            agentType = "codex"
+        } else if text.range(of: #"(?i)\bgemini\s*>"#, options: .regularExpression) != nil {
+            agentType = "gemini"
+        } else {
+            agentType = nil
+        }
+
+        if let agentType {
+            DispatchQueue.main.async { [weak self] in
+                self?.upgradeToAgentSession(session: session, agentType: agentType)
+            }
+        }
+    }
+
+    /// Upgrade a shell session to an agent session: create detector, re-register with multiplexer.
+    func upgradeToAgentSession(session: Session, agentType: String) {
+        guard !session.isAgent else { return }
+        guard session.ptyFD >= 0, let backend = session.backend else { return }
+
+        session.isAgent = true
+        session.agentType = agentType
+
+        let detector = AgentDetector(
+            agentType: agentType,
+            sessionId: session.id,
+            sessionName: session.name
+        )
+        stateLock.lock()
+        detectors[session.id] = detector
+        stateLock.unlock()
+
+        // Re-register with multiplexer to include the detector for inline analysis
+        let sessionId = session.id
+        let onDirty = onSessionDirty ?? {}
+
+        let io = PTYMultiplexer.SessionIO(
+            id: sessionId,
+            backend: backend,
+            agentDetector: detector,
+            onOutput: { [weak self] in
+                if let detector = self?.detectors[sessionId] {
+                    let newState = detector.state
+                    let oldState = session.agentState
+                    let model = detector.modelDetector.currentModel
+                    let events = detector.consumeEvents()
+
+                    DispatchQueue.main.async {
+                        session.agentState = newState
+                        if model != session.agentModel { session.agentModel = model }
+                        self?.updateStatusLine(session: session, backend: backend)
+
+                        if let project = self?.findProject(for: session) {
+                            project.activityLog.append(contentsOf: events)
+                        }
+
+                        for event in events {
+                            if case .fileWrite(let path, _, _) = event.kind {
+                                if session.agentState == .working {
+                                    session.filesChangedInTask.append(path)
+                                }
+                            }
+                        }
+
+                        if newState != oldState {
+                            if newState == .working && oldState != .working {
+                                session.taskStartedAt = Date()
+                                session.filesChangedInTask = []
+                            }
+                            if oldState == .working && newState != .working {
+                                let duration = session.taskStartedAt
+                                    .map { Date().timeIntervalSince($0) } ?? 0
+                                let files = session.filesChangedInTask
+                                if let project = self?.findProject(for: session) {
+                                    project.activityLog.append(ActivityEvent(
+                                        timestamp: Date(),
+                                        sessionId: session.id,
+                                        sessionName: session.name,
+                                        kind: .taskCompleted(duration: duration)
+                                    ))
+                                }
+                                self?.onTaskCompleted?(session, files, duration)
+                            }
+                            if let project = self?.findProject(for: session) {
+                                AgentNotifications.notifyAgentState(project: project, session: session)
+                            }
+                        }
+                    }
+                }
+                DispatchQueue.main.async {
+                    onDirty()
+                }
+            },
+            onExit: { [weak self] in
+                self?.handleSessionExit(session)
+            },
+            onRawOutput: { [weak self] bytes in
+                self?.stateLock.lock()
+                let recorder = self?.recorders[sessionId]
+                self?.stateLock.unlock()
+                recorder?.recordOutput(bytes)
+            }
+        )
+
+        multiplexer.updateSession(fd: session.ptyFD, session: io)
+    }
+
     // MARK: - Status Line Parsing
 
     /// Parse Claude Code's status bar from the terminal buffer (throttled to every 3s).
@@ -359,18 +549,26 @@ final class SessionManager {
         let info = Self.parseStatusLine(from: backend)
         if info.context != session.agentContext { session.agentContext = info.context }
         if info.mode != session.agentMode { session.agentMode = info.mode }
+        if info.effort != session.agentEffort { session.agentEffort = info.effort }
         if info.cost != session.agentCost { session.agentCost = info.cost }
     }
 
+    struct StatusLineInfo {
+        var context: String?
+        var mode: String?
+        var effort: String?
+        var cost: String?
+    }
+
     /// Read the bottom rows of the terminal buffer and extract status bar info.
-    private static func parseStatusLine(from backend: TerminalBackend) -> (context: String?, mode: String?, cost: String?) {
+    static func parseStatusLine(from backend: TerminalBackend) -> StatusLineInfo {
         backend.lock()
         let rows = backend.rows
         let cols = backend.cols
 
-        // Read bottom 2 rows (Claude Code status bar sits at the bottom)
+        // Read bottom 3 rows (Claude Code status bar sits at the bottom)
         var text = ""
-        for row in max(0, rows - 2)..<rows {
+        for row in max(0, rows - 3)..<rows {
             for col in 0..<cols {
                 let cell = backend.cell(row: row, col: col)
                 let cp = cell.codepoint
@@ -384,37 +582,50 @@ final class SessionManager {
         }
         backend.unlock()
 
-        var context: String?
-        var mode: String?
-        var cost: String?
+        var info = StatusLineInfo()
 
         // Context: "45k/200k" or "45.2k / 200k" or "128.5k/200k"
         if let range = text.range(of: #"\d+\.?\d*[kK]\s*/\s*\d+\.?\d*[kK]"#, options: .regularExpression) {
-            context = String(text[range]).replacingOccurrences(of: " ", with: "")
+            info.context = String(text[range]).replacingOccurrences(of: " ", with: "")
         }
 
         // Cost: "$0.23" or "$12.45"
         if let range = text.range(of: #"\$\d+\.\d+"#, options: .regularExpression) {
-            cost = String(text[range])
+            info.cost = String(text[range])
         }
 
-        // Mode: match known Claude Code permission modes
+        // Effort: "high", "medium", "low", "max" (Claude Code reasoning effort)
+        let effortPatterns: [(pattern: String, label: String)] = [
+            (#"\bmax\b"#, "max"),
+            (#"\bhigh\b"#, "high"),
+            (#"\bmedium\b"#, "medium"),
+            (#"\blow\b"#, "low"),
+        ]
+        for (pattern, label) in effortPatterns {
+            if text.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil {
+                info.effort = label
+                break
+            }
+        }
+
+        // Mode: match known Claude Code permission modes (Shift+Tab cycles)
         // Check more specific patterns first to avoid false positives
         let modePatterns: [(pattern: String, label: String)] = [
-            (#"\bbypass\w*"#, "Bypass"),
+            (#"\bbypass\s*permissions?\b"#, "Bypass"),
             (#"\bdangerously\b"#, "Bypass"),
+            (#"\baccept\s*edits?\b"#, "Accept Edits"),
             (#"\bplan\b"#, "Plan"),
             (#"\bauto\b"#, "Auto"),
             (#"\bdefault\b"#, "Default"),
         ]
         for (pattern, label) in modePatterns {
             if text.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil {
-                mode = label
+                info.mode = label
                 break
             }
         }
 
-        return (context, mode, cost)
+        return info
     }
 
     // MARK: - Private

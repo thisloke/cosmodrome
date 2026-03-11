@@ -25,6 +25,7 @@ final class KeybindingManager {
         case jumpNextNeedsInput
         case commandPalette
         case enterNormalMode
+        case increaseFontSize, decreaseFontSize, resetFontSize
     }
 
     enum Mode {
@@ -89,6 +90,13 @@ final class KeybindingManager {
 
         // Ctrl+Space: toggle to command mode (keyCode 49 = Space)
         normalBindings[Binding(key: 49, modifiers: .control)] = .commandPalette // initially opens palette; toggleMode handled in MainWindowController
+
+        // Cmd+=: increase font size (keyCode 24 = '=')
+        normalBindings[Binding(key: 24, modifiers: .command)] = .increaseFontSize
+        // Cmd+-: decrease font size (keyCode 27 = '-')
+        normalBindings[Binding(key: 27, modifiers: .command)] = .decreaseFontSize
+        // Cmd+0: reset font size (keyCode 29 = '0')
+        normalBindings[Binding(key: 29, modifiers: .command)] = .resetFontSize
     }
 
     private func setupCommandBindings() {

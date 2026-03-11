@@ -19,7 +19,8 @@ public final class Session: Identifiable {
     public var agentState: AgentState = .inactive
     public var agentModel: String?
     public var agentContext: String?     // e.g. "45k/200k"
-    public var agentMode: String?        // e.g. "Auto", "Plan"
+    public var agentMode: String?        // e.g. "Plan", "Accept Edits", "Bypass"
+    public var agentEffort: String?      // e.g. "high", "medium", "low"
     public var agentCost: String?        // e.g. "$0.34"
     @ObservationIgnored public var backend: TerminalBackend?
     @ObservationIgnored public var ptyFD: Int32 = -1

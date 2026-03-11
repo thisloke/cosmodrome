@@ -261,8 +261,19 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
                 projectStore.setActiveProject(id: activeId)
             }
 
-            // Restore window frame
-            if state.windowFrame.count == 4 {
+            // Restore font size
+            if let savedSize = state.fontSize {
+                terminalContentView.setFontSize(CGFloat(savedSize))
+            }
+
+            // Restore window frame and zoom state
+            if state.windowZoomed {
+                // Set a normal-sized frame first, then zoom so macOS enters proper zoom mode
+                let defaultFrame = NSRect(x: 0, y: 0, width: 1200, height: 800)
+                window?.setFrame(defaultFrame, display: true)
+                window?.center()
+                window?.zoom(nil)
+            } else if state.windowFrame.count == 4 {
                 let frame = NSRect(
                     x: state.windowFrame[0],
                     y: state.windowFrame[1],
@@ -878,6 +889,21 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
 
         case .enterNormalMode:
             keybindingManager.setMode(.normal)
+
+        case .increaseFontSize:
+            if let fm = terminalContentView.renderer?.fontManager {
+                terminalContentView.setFontSize(fm.fontSize + 1)
+            }
+
+        case .decreaseFontSize:
+            if let fm = terminalContentView.renderer?.fontManager {
+                terminalContentView.setFontSize(fm.fontSize - 1)
+            }
+
+        case .resetFontSize:
+            if let fm = terminalContentView.renderer?.fontManager {
+                terminalContentView.setFontSize(fm.defaultFontSize)
+            }
         }
 
         return true
@@ -1113,25 +1139,26 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
 
         server.onEvent = { [weak self] event in
             guard let self else { return }
-            guard let kind = event.toEventKind() else { return }
             let sessionId = event.sessionId
 
             DispatchQueue.main.async {
                 if let sid = sessionId {
                     for project in self.projectStore.projects {
                         if let session = project.sessions.first(where: { $0.id == sid }) {
-                            project.activityLog.append(ActivityEvent(
-                                timestamp: event.timestamp,
-                                sessionId: session.id,
-                                sessionName: session.name,
-                                kind: kind
-                            ))
+                            // Upgrade to agent session if not already (hook = agent is running)
+                            if !session.isAgent {
+                                self.sessionManager.upgradeToAgentSession(session: session, agentType: "claude")
+                            }
+
+                            // Forward hook event to detector
+                            // Events flow through detector → consumeEvents() → activity log in onOutput
+                            self.sessionManager.detectors[sid]?.ingestHookEvent(event)
                             return
                         }
                     }
                 }
                 // Fallback: append to active project
-                if let project = self.projectStore.activeProject {
+                if let kind = event.toEventKind(), let project = self.projectStore.activeProject {
                     project.activityLog.append(ActivityEvent(
                         timestamp: event.timestamp,
                         sessionId: sessionId ?? UUID(),
@@ -1368,7 +1395,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
     func saveState() {
         StatePersistence.save(
             window: window,
-            projectStore: projectStore
+            projectStore: projectStore,
+            fontSize: terminalContentView.renderer?.fontManager.fontSize
         )
     }
 

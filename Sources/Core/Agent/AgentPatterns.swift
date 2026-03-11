@@ -26,7 +26,7 @@ public enum AgentPatterns {
             return [
                 AgentPattern(
                     state: .needsInput,
-                    regex: #"(?i)(allow|deny|approve|yes/no|\[y/n\]|Do you want|waiting for|permission)"#,
+                    regex: #"(?i)((?:allow|deny|approve)\s*\?|yes/no|\[y/n\]|\(Y\)es|\(N\)o|Do you want to)"#,
                     lastLineOnly: false,
                     priority: 30
                 ),
