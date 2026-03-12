@@ -163,6 +163,10 @@ public final class SwiftTermBackend: TerminalBackend {
         _bottomPosition
     }
 
+    public var scrollOffset: Int {
+        _scrollOffset
+    }
+
     public func scroll(lines: Int) {
         _lock.lock()
         _scrollOffset = max(0, min(_scrollOffset + lines, _bottomPosition))

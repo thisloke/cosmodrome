@@ -27,7 +27,8 @@ final class TerminalContentView: NSView {
     }
     var focusedSessionId: UUID?
 
-    // Text selection state
+    // Text selection state — rows are stored as ABSOLUTE buffer positions
+    // (viewportRow + scrollbackCount - scrollOffset) so they survive scrolling.
     private(set) var selection: TerminalSelection?
     private var isDragging = false
     private var lastBackingScale: CGFloat = 0
@@ -176,6 +177,9 @@ final class TerminalContentView: NSView {
             let frameRows = max(1, Int(insetFrame.height * scale / cellH))
 
             if backend.cols != frameCols || backend.rows != frameRows {
+                // Clear selection on resize — cell coordinates are no longer valid
+                selection = nil
+                renderer.selection = nil
                 backend.resize(cols: UInt16(frameCols), rows: UInt16(frameRows))
                 if pair.session.ptyFD >= 0 {
                     let gridW = CGFloat(frameCols) * cellW
@@ -224,7 +228,30 @@ final class TerminalContentView: NSView {
         }
 
         renderer.visibleSessions = renderEntries
-        renderer.selection = selection
+
+        // Convert absolute selection to viewport-relative for the renderer
+        if let sel = selection,
+           let focusedId = focusedSessionId,
+           let pair = sessions.first(where: { $0.session.id == focusedId }) {
+            let backend = pair.backend
+            let vpStartRow = sel.startRow - backend.scrollbackCount + backend.scrollOffset
+            let vpEndRow = sel.endRow - backend.scrollbackCount + backend.scrollOffset
+
+            // Only show selection highlight if it intersects with the viewport
+            if vpEndRow >= 0 && vpStartRow < backend.rows {
+                renderer.selection = TerminalSelection(
+                    startRow: vpStartRow,
+                    startCol: sel.startCol,
+                    endRow: vpEndRow,
+                    endCol: sel.endCol
+                )
+            } else {
+                renderer.selection = nil
+            }
+        } else {
+            renderer.selection = nil
+        }
+
         metalView.needsDisplay = true
         updateSessionOverlays()
     }
@@ -454,14 +481,9 @@ final class TerminalContentView: NSView {
                 )
             }
         } else {
-            // Normal scrollback: scroll the viewport through history
+            // Normal scrollback: scroll the viewport through history.
+            // Selection uses absolute row coordinates, so it survives scrolling.
             backend.scroll(lines: scrollUp ? lines : -lines)
-
-            // Clear selection on manual scroll — viewport-relative coordinates become stale
-            if selection != nil {
-                selection = nil
-                renderer?.selection = nil
-            }
         }
     }
 
@@ -476,12 +498,15 @@ final class TerminalContentView: NSView {
             window?.makeFirstResponder(self)
         }
 
-        // Start selection
-        if let cell = cellAt(point: point) {
-            selection = TerminalSelection(startRow: cell.row, startCol: cell.col,
-                                          endRow: cell.row, endCol: cell.col)
+        // Start selection — store as absolute row coordinates
+        if let cell = cellAt(point: point),
+           let focusedId = focusedSessionId,
+           let pair = sessions.first(where: { $0.session.id == focusedId }) {
+            let absRow = cell.row + pair.backend.scrollbackCount - pair.backend.scrollOffset
+            selection = TerminalSelection(startRow: absRow, startCol: cell.col,
+                                          endRow: absRow, endCol: cell.col)
             isDragging = true
-            renderer?.selection = selection
+            updateLayout() // Updates renderer.selection with viewport conversion
         } else {
             selection = nil
             renderer?.selection = nil
@@ -508,10 +533,11 @@ final class TerminalContentView: NSView {
         }
 
         if let cell = cellAt(point: point) {
-            sel.endRow = cell.row
+            let absRow = cell.row + pair.backend.scrollbackCount - pair.backend.scrollOffset
+            sel.endRow = absRow
             sel.endCol = cell.col
             selection = sel
-            renderer?.selection = selection
+            updateLayout() // Updates renderer.selection with viewport conversion
         }
     }
 
@@ -604,27 +630,39 @@ final class TerminalContentView: NSView {
     }
 
     /// Extract text from the backend for the given selection range.
+    /// Selection uses absolute row coordinates; we convert to viewport-relative to read cells.
     private func extractText(from sel: TerminalSelection, backend: TerminalBackend) -> String {
         let (startRow, startCol, endRow, endCol) = sel.normalized()
         var result = ""
 
         backend.lock()
-        for row in startRow...endRow {
-            guard row >= 0 && row < backend.rows else { continue }
 
-            let colStart = (row == startRow) ? startCol : 0
-            let colEnd = (row == endRow) ? endCol : backend.cols - 1
+        // Convert absolute rows to viewport rows
+        let vpOffset = backend.scrollbackCount - backend.scrollOffset
+        let vpStartRow = startRow - vpOffset
+        let vpEndRow = endRow - vpOffset
+
+        // Clamp to visible viewport
+        let visibleStart = max(0, vpStartRow)
+        let visibleEnd = min(backend.rows - 1, vpEndRow)
+
+        for vpRow in visibleStart...visibleEnd {
+            // Map back to absolute row for start/end col determination
+            let absRow = vpRow + vpOffset
+
+            let colStart = (absRow == startRow) ? startCol : 0
+            let colEnd = (absRow == endRow) ? endCol : backend.cols - 1
 
             for col in colStart...colEnd {
                 guard col >= 0 && col < backend.cols else { continue }
-                let cell = backend.cell(row: row, col: col)
+                let cell = backend.cell(row: vpRow, col: col)
                 if cell.codepoint > 0 {
                     result.append(Character(UnicodeScalar(cell.codepoint)!))
                 }
             }
 
             // Add newline between rows (but not after last row)
-            if row < endRow {
+            if absRow < endRow {
                 result.append("\n")
             }
         }

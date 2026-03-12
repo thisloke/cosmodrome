@@ -3,59 +3,63 @@ import XCTest
 
 final class AgentDetectorTests: XCTestCase {
 
+    private func makeDetector(agentType: String = "claude", debounce: TimeInterval = 0) -> AgentDetector {
+        AgentDetector(agentType: agentType, sessionId: UUID(), sessionName: "test", debounce: debounce)
+    }
+
     // MARK: - Claude Code Patterns
 
     func testDetectsNeedsInput() {
-        let detector = AgentDetector(agentType: "claude", debounce: 0)
+        let detector = makeDetector()
         detector.analyzeText("Do you want to allow this tool?")
         XCTAssertEqual(detector.state, .needsInput)
     }
 
     func testDetectsYesNo() {
-        let detector = AgentDetector(agentType: "claude", debounce: 0)
+        let detector = makeDetector()
         detector.analyzeText("Continue? [y/n]")
         XCTAssertEqual(detector.state, .needsInput)
     }
 
     func testDetectsError() {
-        let detector = AgentDetector(agentType: "claude", debounce: 0)
+        let detector = makeDetector()
         detector.analyzeText("Error: something failed")
         XCTAssertEqual(detector.state, .error)
     }
 
     func testDetectsWorkingSpinner() {
-        let detector = AgentDetector(agentType: "claude", debounce: 0)
+        let detector = makeDetector()
         detector.analyzeText("⠋ Processing...")
         XCTAssertEqual(detector.state, .working)
     }
 
     func testDetectsWorkingTool() {
-        let detector = AgentDetector(agentType: "claude", debounce: 0)
+        let detector = makeDetector()
         detector.analyzeText("Read file.swift\nContent follows...")
         XCTAssertEqual(detector.state, .working)
     }
 
     func testNeedsInputPriority() {
-        let detector = AgentDetector(agentType: "claude", debounce: 0)
+        let detector = makeDetector()
         detector.analyzeText("Error occurred. Do you want to retry? [y/n]")
         XCTAssertEqual(detector.state, .needsInput)
     }
 
     func testErrorPriority() {
-        let detector = AgentDetector(agentType: "claude", debounce: 0)
+        let detector = makeDetector()
         // "failed" matches error, "Bash " matches working, but error has higher priority
         detector.analyzeText("Bash execution failed with error")
         XCTAssertEqual(detector.state, .error)
     }
 
     func testNoMatchKeepsState() {
-        let detector = AgentDetector(agentType: "claude", debounce: 0)
+        let detector = makeDetector()
         detector.analyzeText("Hello world")
         XCTAssertEqual(detector.state, .inactive)
     }
 
     func testReset() {
-        let detector = AgentDetector(agentType: "claude", debounce: 0)
+        let detector = makeDetector()
         detector.analyzeText("Error occurred")
         XCTAssertEqual(detector.state, .error)
         detector.reset()
@@ -65,13 +69,13 @@ final class AgentDetectorTests: XCTestCase {
     // MARK: - Generic Patterns
 
     func testGenericNeedsInput() {
-        let detector = AgentDetector(agentType: "unknown", debounce: 0)
+        let detector = makeDetector(agentType: "unknown")
         detector.analyzeText("Confirm action? [y/n]")
         XCTAssertEqual(detector.state, .needsInput)
     }
 
     func testGenericError() {
-        let detector = AgentDetector(agentType: "unknown", debounce: 0)
+        let detector = makeDetector(agentType: "unknown")
         detector.analyzeText("Command failed")
         XCTAssertEqual(detector.state, .error)
     }
@@ -79,7 +83,7 @@ final class AgentDetectorTests: XCTestCase {
     // MARK: - Debounce
 
     func testDebounce() {
-        let detector = AgentDetector(agentType: "claude", debounce: 10.0)
+        let detector = makeDetector(debounce: 10.0)
         detector.analyzeText("Error occurred")
         XCTAssertEqual(detector.state, .error)
         // Second change should be debounced (within 10s)
@@ -90,7 +94,7 @@ final class AgentDetectorTests: XCTestCase {
     // MARK: - UnsafeRawBufferPointer API
 
     func testAnalyzeRawBuffer() {
-        let detector = AgentDetector(agentType: "claude", debounce: 0)
+        let detector = makeDetector()
         let text = "Error: test failed"
         text.utf8.withContiguousStorageIfAvailable { buffer in
             let raw = UnsafeRawBufferPointer(buffer)
@@ -133,7 +137,7 @@ final class AgentDetectorTests: XCTestCase {
     }
 
     func testDetectsNeedsInputWithANSI() {
-        let detector = AgentDetector(agentType: "claude", debounce: 0)
+        let detector = makeDetector()
         // Simulates ANSI-wrapped "Allow" prompt as seen in raw PTY output
         detector.analyzeText("\u{1B}[1;33mAllow\u{1B}[0m Read file.swift? [y/n]")
         XCTAssertEqual(detector.state, .needsInput)

@@ -20,6 +20,10 @@ final class SessionManager {
     private var lastAgentCheck: [UUID: Date] = [:]
     /// Tracks when a session was upgraded to agent (for adaptive throttle).
     private var agentUpgradeTime: [UUID: Date] = [:]
+    /// Throttle for agent downgrade checks.
+    private var lastDowngradeCheck: [UUID: Date] = [:]
+    /// Throttle for git branch detection.
+    private var lastBranchCheck: [UUID: Date] = [:]
     /// Lock for dicts accessed from both I/O and main threads.
     private let stateLock = NSLock()
 
@@ -134,8 +138,8 @@ final class SessionManager {
             detector.stats = session.stats
             stateLock.lock()
             detectors[session.id] = detector
-            stateLock.unlock()
             agentUpgradeTime[session.id] = Date()
+            stateLock.unlock()
         }
 
         session.backend = backend
@@ -172,6 +176,10 @@ final class SessionManager {
                         self?.updateStatusLine(session: session, backend: backend)
                         // Scan terminal buffer for permission prompts (throttled, 300ms)
                         self?.scanForPromptIfNeeded(session: session, backend: backend)
+                        // Check if agent exited and session returned to shell (throttled, 5s)
+                        self?.checkForAgentExit(session: session, backend: backend)
+                        // Detect git branch (throttled, 5s)
+                        self?.updateGitBranch(session: session)
 
                         // Append events to project's activity log
                         if let project = self?.findProject(for: session) {
@@ -227,6 +235,10 @@ final class SessionManager {
                 } else {
                     // No detector yet — check if an agent started in this shell session
                     self?.checkForAgentStartup(session: session, backend: backend)
+                    // Detect git branch for plain shell sessions too
+                    DispatchQueue.main.async {
+                        self?.updateGitBranch(session: session)
+                    }
                 }
                 DispatchQueue.main.async {
                     onDirty()
@@ -314,11 +326,20 @@ final class SessionManager {
 
         portDetector.untrack(sessionId: session.id)
 
-        if session.pid > 0 {
-            kill(session.pid, SIGTERM)
+        let pid = session.pid
+        let fd = session.ptyFD
+
+        if pid > 0 {
+            kill(pid, SIGTERM)
         }
-        if session.ptyFD >= 0 {
-            multiplexer.unregister(fd: session.ptyFD)
+        if fd >= 0 {
+            multiplexer.unregister(fd: fd)
+            close(fd)
+        }
+        // Reap child process to prevent zombie
+        if pid > 0 {
+            var status: Int32 = 0
+            waitpid(pid, &status, WNOHANG)
         }
 
         session.isRunning = false
@@ -334,12 +355,14 @@ final class SessionManager {
         session.taskStartedAt = nil
         session.filesChangedInTask = []
         session.detectedPorts = []
+        session.gitBranch = nil
         stateLock.lock()
+        defer { stateLock.unlock() }
         lastStatusParse.removeValue(forKey: session.id)
         lastPromptScan.removeValue(forKey: session.id)
         detectors.removeValue(forKey: session.id)
         lastAgentCheck.removeValue(forKey: session.id)
-        stateLock.unlock()
+        lastBranchCheck.removeValue(forKey: session.id)
         agentUpgradeTime.removeValue(forKey: session.id)
     }
 
@@ -364,7 +387,10 @@ final class SessionManager {
 
     /// Start recording a session's output in asciicast v2 format.
     func startRecording(session: Session) {
-        guard recorders[session.id] == nil else { return }
+        stateLock.lock()
+        let alreadyRecording = recorders[session.id] != nil
+        stateLock.unlock()
+        guard !alreadyRecording else { return }
 
         let backend = session.backend
         let width = backend?.cols ?? 80
@@ -380,7 +406,9 @@ final class SessionManager {
             let recorder = try AsciicastRecorder(
                 path: path, width: width, height: height, title: session.name
             )
+            stateLock.lock()
             recorders[session.id] = recorder
+            stateLock.unlock()
         } catch {
             FileHandle.standardError.write("[Cosmodrome] Failed to start recording: \(error)\n".data(using: .utf8)!)
         }
@@ -388,13 +416,17 @@ final class SessionManager {
 
     /// Stop recording a session.
     func stopRecording(session: Session) {
-        guard let recorder = recorders.removeValue(forKey: session.id) else { return }
-        recorder.close()
+        stateLock.lock()
+        let recorder = recorders.removeValue(forKey: session.id)
+        stateLock.unlock()
+        recorder?.close()
     }
 
     /// Check if a session is being recorded.
     func isRecording(session: Session) -> Bool {
-        recorders[session.id] != nil
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return recorders[session.id] != nil
     }
 
     // MARK: - Runtime Agent Detection
@@ -440,10 +472,16 @@ final class SessionManager {
         Self.debugLog("checkForAgentStartup: session=\(session.name) scanning \(scanRows) rows, text=\(text.prefix(300))")
 
         // Detect agent startup signatures.
-        // Claude Code: spinner chars, status bar signatures, welcome text, or TUI elements.
+        // Spinner chars alone are NOT sufficient — many CLI tools (npm, cargo, pip) use them.
+        // Require spinner + a secondary Claude Code signal to avoid false upgrades.
         let agentType: String?
         if text.range(of: #"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]"#, options: .regularExpression) != nil {
-            agentType = "claude"
+            let hasSecondarySignal =
+                text.range(of: #"ctx:\s*\d+"#, options: .regularExpression) != nil
+                || text.range(of: #"(?i)\b(opus|sonnet|haiku)\s+\d"#, options: .regularExpression) != nil
+                || text.range(of: #"shift\+tab"#, options: [.regularExpression, .caseInsensitive]) != nil
+                || text.range(of: #"(?i)\bclaude\s+code\b"#, options: .regularExpression) != nil
+            agentType = hasSecondarySignal ? "claude" : nil
         } else if text.range(of: #"ctx:\s*\d+"#, options: .regularExpression) != nil
             || text.range(of: #"(?i)\b(opus|sonnet|haiku)\s+\d"#, options: .regularExpression) != nil
             || text.range(of: #"shift\+tab"#, options: [.regularExpression, .caseInsensitive]) != nil {
@@ -480,7 +518,6 @@ final class SessionManager {
         Self.debugLog("upgradeToAgentSession: session=\(session.name) type=\(agentType)")
         session.isAgent = true
         session.agentType = agentType
-        agentUpgradeTime[session.id] = Date()
 
         let detector = AgentDetector(
             agentType: agentType,
@@ -490,6 +527,7 @@ final class SessionManager {
         detector.stats = session.stats
         stateLock.lock()
         detectors[session.id] = detector
+        agentUpgradeTime[session.id] = Date()
         stateLock.unlock()
 
         // Re-register with multiplexer to include the detector for inline analysis
@@ -501,7 +539,10 @@ final class SessionManager {
             backend: backend,
             agentDetector: detector,
             onOutput: { [weak self] in
-                if let detector = self?.detectors[sessionId] {
+                self?.stateLock.lock()
+                let detector = self?.detectors[sessionId]
+                self?.stateLock.unlock()
+                if let detector {
                     let newState = detector.state
                     let oldState = session.agentState
                     let model = detector.modelDetector.currentModel
@@ -512,6 +553,7 @@ final class SessionManager {
                         if model != session.agentModel { session.agentModel = model }
                         self?.updateStatusLine(session: session, backend: backend)
                         self?.scanForPromptIfNeeded(session: session, backend: backend)
+                        self?.updateGitBranch(session: session)
 
                         if let project = self?.findProject(for: session) {
                             project.activityLog.append(contentsOf: events)
@@ -566,6 +608,90 @@ final class SessionManager {
         )
 
         multiplexer.updateSession(fd: session.ptyFD, session: io)
+    }
+
+    /// Check if an agent has exited and the session returned to a plain shell.
+    /// If so, downgrade the session back to non-agent to avoid false status detections.
+    /// Throttled to every 5 seconds.
+    private func checkForAgentExit(session: Session, backend: TerminalBackend) {
+        guard session.isAgent else { return }
+
+        stateLock.lock()
+        let detector = detectors[session.id]
+        let now = Date()
+        if let last = lastDowngradeCheck[session.id], now.timeIntervalSince(last) < 5.0 {
+            stateLock.unlock()
+            return
+        }
+        lastDowngradeCheck[session.id] = now
+        stateLock.unlock()
+
+        // Only consider downgrade if detector state is inactive
+        guard let detector, detector.state == .inactive else { return }
+
+        // Read last line of terminal buffer to check for shell prompt
+        backend.lock()
+        let rows = backend.rows
+        let cols = backend.cols
+        var lastLine = ""
+        let lastRow = max(0, rows - 1)
+        for col in 0..<cols {
+            let cell = backend.cellAtBottom(row: lastRow, col: col)
+            let cp = cell.codepoint
+            if cp >= 32 && cp < 0x110000 {
+                lastLine.append(Character(Unicode.Scalar(cp)!))
+            }
+        }
+
+        // Also check for agent signatures still visible
+        var bufferText = ""
+        let scanRows = min(rows, 6)
+        for row in max(0, rows - scanRows)..<rows {
+            for col in 0..<cols {
+                let cell = backend.cellAtBottom(row: row, col: col)
+                let cp = cell.codepoint
+                if cp >= 32 && cp < 0x110000 {
+                    bufferText.append(Character(Unicode.Scalar(cp)!))
+                }
+            }
+            bufferText.append("\n")
+        }
+        backend.unlock()
+
+        let trimmed = lastLine.trimmingCharacters(in: .whitespaces)
+        let looksLikeShellPrompt = trimmed.hasSuffix("$") || trimmed.hasSuffix("%")
+            || trimmed.hasSuffix("#") || trimmed.hasSuffix(">")
+
+        // Check if any agent signatures are still visible
+        let hasAgentSignature =
+            bufferText.range(of: #"ctx:\s*\d+"#, options: .regularExpression) != nil
+            || bufferText.range(of: #"(?i)\b(opus|sonnet|haiku)\s+\d"#, options: .regularExpression) != nil
+            || bufferText.range(of: #"shift\+tab"#, options: [.regularExpression, .caseInsensitive]) != nil
+            || bufferText.range(of: #"(?i)\bclaude\s+code\b"#, options: .regularExpression) != nil
+            || bufferText.range(of: #"(?i)\baider\s*>"#, options: .regularExpression) != nil
+            || bufferText.range(of: #"(?i)\bcodex\s*>"#, options: .regularExpression) != nil
+            || bufferText.range(of: #"(?i)\bgemini\s*>"#, options: .regularExpression) != nil
+
+        if looksLikeShellPrompt && !hasAgentSignature {
+            Self.debugLog("checkForAgentExit: downgrading session=\(session.name) back to plain shell")
+            DispatchQueue.main.async { [weak self] in
+                self?.downgradeFromAgent(session: session)
+            }
+        }
+    }
+
+    /// Downgrade a session from agent back to plain shell.
+    private func downgradeFromAgent(session: Session) {
+        guard session.isAgent else { return }
+        session.isAgent = false
+        session.agentType = nil
+        session.agentState = .inactive
+        session.agentModel = nil
+        stateLock.lock()
+        detectors.removeValue(forKey: session.id)
+        stateLock.unlock()
+        agentUpgradeTime.removeValue(forKey: session.id)
+        lastDowngradeCheck.removeValue(forKey: session.id)
     }
 
     // MARK: - Status Line Parsing
@@ -741,6 +867,59 @@ final class SessionManager {
         return Double(cleaned)
     }
 
+    // MARK: - Git Branch Detection
+
+    /// Detect the current git branch for a session's working directory.
+    /// Throttled to every 5 seconds — branch changes are infrequent.
+    private func updateGitBranch(session: Session) {
+        let now = Date()
+        stateLock.lock()
+        if let last = lastBranchCheck[session.id], now.timeIntervalSince(last) < 5.0 {
+            stateLock.unlock()
+            return
+        }
+        lastBranchCheck[session.id] = now
+        stateLock.unlock()
+
+        let cwd = session.cwd == "." ? FileManager.default.currentDirectoryPath : session.cwd
+
+        DispatchQueue.global(qos: .utility).async {
+            let branch = Self.detectGitBranch(in: cwd)
+            DispatchQueue.main.async {
+                if branch != session.gitBranch {
+                    session.gitBranch = branch
+                }
+            }
+        }
+    }
+
+    /// Run `git rev-parse --abbrev-ref HEAD` in the given directory.
+    static func detectGitBranch(in directory: String) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["rev-parse", "--abbrev-ref", "HEAD"]
+        process.currentDirectoryURL = URL(fileURLWithPath: directory)
+        process.environment = ["GIT_TERMINAL_PROMPT": "0"]
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return nil
+        }
+
+        guard process.terminationStatus == 0 else { return nil }
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let output = String(data: data, encoding: .utf8) else { return nil }
+        let branch = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return branch.isEmpty ? nil : branch
+    }
+
     // MARK: - Terminal Buffer Prompt Scanning
 
     /// Patterns that indicate a permission/input prompt is visible on screen.
@@ -852,9 +1031,10 @@ final class SessionManager {
         }
 
         // Stop recording if active
-        if let recorder = recorders.removeValue(forKey: session.id) {
-            recorder.close()
-        }
+        stateLock.lock()
+        let recorder = recorders.removeValue(forKey: session.id)
+        stateLock.unlock()
+        recorder?.close()
 
         // Mark unexpected exit (process died while it was running)
         if wasRunning {

@@ -47,10 +47,11 @@ enum EventFilter: CaseIterable {
 
 // MARK: - Main View
 
-/// Full-screen activity log overlay. The hero feature of Cosmodrome.
-/// Shows what all agents did, grouped by session, with filtering and summary.
+/// Activity log view showing what all agents did, grouped by session, with filtering and summary.
+/// Supports two modes: compact (sidebar panel) and full (overlay).
 struct ActivityLogView: View {
     let projects: [Project]
+    var compact: Bool = false
     var onFocusSession: (UUID, UUID) -> Void  // (projectId, sessionId)
     var onDismiss: () -> Void
 
@@ -61,24 +62,37 @@ struct ActivityLogView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
+            if compact {
+                compactHeader
+            } else {
+                header
+            }
             Divider().opacity(0.3)
-            summaryBar
-            Divider().opacity(0.3)
-            filterBar
-                .padding(.horizontal, Spacing.lg)
-                .padding(.vertical, Spacing.sm)
+            if !compact {
+                summaryBar
+                Divider().opacity(0.3)
+            }
+            if compact {
+                compactFilterBar
+                    .padding(.horizontal, Spacing.sm)
+                    .padding(.vertical, Spacing.xs)
+            } else {
+                filterBar
+                    .padding(.horizontal, Spacing.lg)
+                    .padding(.vertical, Spacing.sm)
+            }
             Divider().opacity(0.3)
 
             if sessionEntries.isEmpty {
                 emptyState
             } else {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: Spacing.sm) {
+                    LazyVStack(alignment: .leading, spacing: compact ? 2 : Spacing.sm) {
                         ForEach(sessionEntries, id: \.sessionId) { entry in
                             SessionSection(
                                 entry: entry,
                                 eventFilter: eventFilter,
+                                compact: compact,
                                 isExpanded: expandedSessions.contains(entry.sessionId),
                                 onToggle: { toggleSession(entry.sessionId) },
                                 onFocus: {
@@ -89,7 +103,7 @@ struct ActivityLogView: View {
                             )
                         }
                     }
-                    .padding(Spacing.lg)
+                    .padding(compact ? Spacing.sm : Spacing.lg)
                 }
             }
         }
@@ -97,9 +111,62 @@ struct ActivityLogView: View {
         .onAppear {
             if !initialExpandDone {
                 // Auto-expand sessions that have recent activity
-                expandedSessions = Set(sessionEntries.prefix(5).map(\.sessionId))
+                expandedSessions = Set(sessionEntries.prefix(compact ? 3 : 5).map(\.sessionId))
                 initialExpandDone = true
             }
+        }
+    }
+
+    // MARK: - Compact Header
+
+    private var compactHeader: some View {
+        HStack(spacing: Spacing.sm) {
+            Image(systemName: "list.bullet.rectangle.portrait")
+                .font(.system(size: 11))
+                .foregroundColor(DS.accent)
+            Text("Activity")
+                .font(Typo.subheadingMedium)
+                .foregroundColor(DS.textPrimary)
+
+            Spacer()
+
+            Text("\(allFilteredEvents.count)")
+                .font(Typo.captionMono)
+                .foregroundColor(DS.textTertiary)
+
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(DS.textSecondary)
+                    .frame(width: 18, height: 18)
+                    .background(DS.bgHover)
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, Spacing.sm)
+        .padding(.vertical, Spacing.xs)
+        .background(DS.bgSidebar)
+    }
+
+    private var compactFilterBar: some View {
+        HStack(spacing: 2) {
+            ForEach(EventFilter.allCases, id: \.self) { ef in
+                let isActive = eventFilter == ef
+                Button(action: { withAnimation(Anim.quick) { eventFilter = ef } }) {
+                    Text(ef.label)
+                        .font(Typo.caption)
+                        .foregroundColor(isActive ? DS.textPrimary : DS.textTertiary)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 2)
+                        .background(
+                            RoundedRectangle(cornerRadius: Radius.sm)
+                                .fill(isActive ? DS.bgSelected : Color.clear)
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer()
         }
     }
 
@@ -416,6 +483,7 @@ private struct SessionEntry {
 private struct SessionSection: View {
     let entry: SessionEntry
     let eventFilter: EventFilter
+    var compact: Bool = false
     let isExpanded: Bool
     var onToggle: () -> Void
     var onFocus: () -> Void
@@ -426,86 +494,11 @@ private struct SessionSection: View {
         VStack(alignment: .leading, spacing: 0) {
             // Session header row
             Button(action: onToggle) {
-                HStack(spacing: Spacing.sm) {
-                    // Expand chevron
-                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundColor(DS.textTertiary)
-                        .frame(width: 12)
-
-                    // State dot
-                    Circle()
-                        .fill(DS.stateColor(for: entry.agentState))
-                        .frame(width: 7, height: 7)
-
-                    // Session name
-                    Text(entry.sessionName)
-                        .font(Typo.subheadingMedium)
-                        .foregroundColor(DS.textPrimary)
-                        .lineLimit(1)
-
-                    // State label
-                    Text(stateLabel)
-                        .font(Typo.footnote)
-                        .foregroundColor(DS.stateColor(for: entry.agentState).opacity(0.8))
-
-                    // Agent type + model
-                    if let type = entry.agentType {
-                        Text(type.capitalized)
-                            .font(Typo.footnote)
-                            .foregroundColor(DS.textTertiary)
-                    }
-                    if let model = entry.model {
-                        Text(model)
-                            .font(Typo.captionMono)
-                            .foregroundColor(DS.textTertiary)
-                    }
-
-                    Spacer()
-
-                    // Stats
-                    if entry.cost > 0 {
-                        Text(SessionStats.formatCost(entry.cost))
-                            .font(Typo.footnoteMono)
-                            .foregroundColor(DS.textSecondary)
-                    }
-
-                    if entry.fileCount > 0 {
-                        HStack(spacing: 2) {
-                            Image(systemName: "doc.fill")
-                                .font(.system(size: 8))
-                            Text("\(entry.fileCount)")
-                                .font(Typo.captionMono)
-                        }
-                        .foregroundColor(.orange.opacity(0.7))
-                    }
-
-                    Text("\(entry.events.count) events")
-                        .font(Typo.captionMono)
-                        .foregroundColor(DS.textTertiary)
-
-                    // Project badge
-                    Text(entry.projectName)
-                        .font(Typo.caption)
-                        .foregroundColor(DS.textTertiary)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(DS.bgHover)
-                        .cornerRadius(Radius.sm)
-
-                    // Focus button (visible on hover)
-                    if isHovered {
-                        Button(action: onFocus) {
-                            Image(systemName: "arrow.up.forward.app")
-                                .font(.system(size: 10))
-                                .foregroundColor(DS.accent)
-                        }
-                        .buttonStyle(.plain)
-                    }
+                if compact {
+                    compactHeaderContent
+                } else {
+                    fullHeaderContent
                 }
-                .padding(.horizontal, Spacing.md)
-                .padding(.vertical, Spacing.sm)
-                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .onHover { isHovered = $0 }
@@ -513,30 +506,141 @@ private struct SessionSection: View {
             // Event rows (when expanded)
             if isExpanded {
                 VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(entry.events.prefix(100).enumerated()), id: \.offset) { _, event in
-                        ActivityEventRow(event: event)
+                    ForEach(Array(entry.events.prefix(compact ? 20 : 100).enumerated()), id: \.offset) { _, event in
+                        ActivityEventRow(event: event, compact: compact)
                     }
 
-                    if entry.events.count > 100 {
-                        Text("+ \(entry.events.count - 100) more events")
+                    let limit = compact ? 20 : 100
+                    if entry.events.count > limit {
+                        Text("+ \(entry.events.count - limit) more")
                             .font(Typo.caption)
                             .foregroundColor(DS.textTertiary)
-                            .padding(.horizontal, Spacing.lg)
+                            .padding(.horizontal, compact ? Spacing.sm : Spacing.lg)
                             .padding(.vertical, Spacing.xs)
                     }
                 }
-                .padding(.leading, Spacing.xl)
+                .padding(.leading, compact ? Spacing.md : Spacing.xl)
             }
         }
         .background(
-            RoundedRectangle(cornerRadius: Radius.lg)
+            RoundedRectangle(cornerRadius: compact ? Radius.md : Radius.lg)
                 .fill(isHovered ? DS.bgHover.opacity(0.5) : DS.bgElevated.opacity(0.3))
                 .animation(Anim.quick, value: isHovered)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: Radius.lg)
+            RoundedRectangle(cornerRadius: compact ? Radius.md : Radius.lg)
                 .stroke(borderColor, lineWidth: 0.5)
         )
+    }
+
+    private var compactHeaderContent: some View {
+        HStack(spacing: 4) {
+            Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                .font(.system(size: 8, weight: .semibold))
+                .foregroundColor(DS.textTertiary)
+                .frame(width: 10)
+
+            Circle()
+                .fill(DS.stateColor(for: entry.agentState))
+                .frame(width: 6, height: 6)
+
+            Text(entry.sessionName)
+                .font(Typo.bodyMedium)
+                .foregroundColor(DS.textPrimary)
+                .lineLimit(1)
+
+            Spacer()
+
+            Text("\(entry.events.count)")
+                .font(Typo.captionMono)
+                .foregroundColor(DS.textTertiary)
+        }
+        .padding(.horizontal, Spacing.sm)
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+    }
+
+    private var fullHeaderContent: some View {
+        HStack(spacing: Spacing.sm) {
+            // Expand chevron
+            Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(DS.textTertiary)
+                .frame(width: 12)
+
+            // State dot
+            Circle()
+                .fill(DS.stateColor(for: entry.agentState))
+                .frame(width: 7, height: 7)
+
+            // Session name
+            Text(entry.sessionName)
+                .font(Typo.subheadingMedium)
+                .foregroundColor(DS.textPrimary)
+                .lineLimit(1)
+
+            // State label
+            Text(stateLabel)
+                .font(Typo.footnote)
+                .foregroundColor(DS.stateColor(for: entry.agentState).opacity(0.8))
+
+            // Agent type + model
+            if let type = entry.agentType {
+                Text(type.capitalized)
+                    .font(Typo.footnote)
+                    .foregroundColor(DS.textTertiary)
+            }
+            if let model = entry.model {
+                Text(model)
+                    .font(Typo.captionMono)
+                    .foregroundColor(DS.textTertiary)
+            }
+
+            Spacer()
+
+            // Stats
+            if entry.cost > 0 {
+                Text(SessionStats.formatCost(entry.cost))
+                    .font(Typo.footnoteMono)
+                    .foregroundColor(DS.textSecondary)
+            }
+
+            if entry.fileCount > 0 {
+                HStack(spacing: 2) {
+                    Image(systemName: "doc.fill")
+                        .font(.system(size: 8))
+                    Text("\(entry.fileCount)")
+                        .font(Typo.captionMono)
+                }
+                .foregroundColor(.orange.opacity(0.7))
+            }
+
+            Text("\(entry.events.count) events")
+                .font(Typo.captionMono)
+                .foregroundColor(DS.textTertiary)
+
+            // Project badge
+            Text(entry.projectName)
+                .font(Typo.caption)
+                .foregroundColor(DS.textTertiary)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 1)
+                .background(DS.bgHover)
+                .cornerRadius(Radius.sm)
+
+            // Focus button (visible on hover)
+            if isHovered {
+                Button(action: onFocus) {
+                    Image(systemName: "arrow.up.forward.app")
+                        .font(.system(size: 10))
+                        .foregroundColor(DS.accent)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, Spacing.md)
+        .padding(.vertical, Spacing.sm)
+        .contentShape(Rectangle())
     }
 
     private var stateLabel: String {
@@ -562,33 +666,34 @@ private struct SessionSection: View {
 
 private struct ActivityEventRow: View {
     let event: ActivityEvent
+    var compact: Bool = false
 
     @State private var isHovered = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: Spacing.sm) {
+        HStack(alignment: .top, spacing: compact ? 4 : Spacing.sm) {
             // Timestamp
             Text(timeString)
                 .font(Typo.captionMono)
                 .foregroundColor(DS.textTertiary)
-                .frame(width: 38, alignment: .trailing)
+                .frame(width: compact ? 30 : 38, alignment: .trailing)
 
             // Icon
             Image(systemName: iconName)
-                .font(.system(size: 9))
+                .font(.system(size: compact ? 8 : 9))
                 .foregroundColor(iconColor)
-                .frame(width: 14)
+                .frame(width: compact ? 10 : 14)
 
             // Description
             Text(description)
-                .font(Typo.body)
+                .font(compact ? Typo.caption : Typo.body)
                 .foregroundColor(DS.textPrimary.opacity(0.85))
-                .lineLimit(2)
+                .lineLimit(compact ? 1 : 2)
 
             Spacer()
         }
-        .padding(.horizontal, Spacing.md)
-        .padding(.vertical, 3)
+        .padding(.horizontal, compact ? Spacing.sm : Spacing.md)
+        .padding(.vertical, compact ? 2 : 3)
         .background(
             RoundedRectangle(cornerRadius: Radius.sm)
                 .fill(isHovered ? DS.bgHover : Color.clear)

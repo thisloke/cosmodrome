@@ -88,14 +88,25 @@ struct SessionThumbnailView: View {
                         .foregroundColor(DS.textTertiary)
                 }
 
+                if let branch = session.gitBranch {
+                    HStack(spacing: 2) {
+                        Image(systemName: "arrow.triangle.branch")
+                            .font(.system(size: 7))
+                        Text(branch)
+                            .font(Typo.captionMono)
+                            .lineLimit(1)
+                    }
+                    .foregroundColor(DS.textTertiary)
+                }
+
                 Spacer()
 
-                if session.agentState == .needsInput {
+                if session.isAgent && session.agentState == .needsInput {
                     Text("needs input")
                         .font(Typo.caption)
                         .foregroundColor(DS.stateNeedsInput)
                         .transition(.opacity)
-                } else if session.agentState == .error {
+                } else if session.isAgent && session.agentState == .error {
                     Label("error", systemImage: "exclamationmark.triangle.fill")
                         .font(Typo.caption)
                         .foregroundColor(DS.stateError.opacity(0.8))

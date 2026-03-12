@@ -25,6 +25,9 @@ public protocol TerminalBackend: AnyObject {
     /// Scrollback line count.
     var scrollbackCount: Int { get }
 
+    /// Current scroll offset from bottom (0 = at bottom, >0 = scrolled back into history).
+    var scrollOffset: Int { get }
+
     /// Data the terminal wants to send back (e.g., cursor position reports).
     /// Nil if nothing pending.
     func pendingSendData() -> Data?
@@ -75,6 +78,7 @@ extension TerminalBackend {
     public var cursorStyle: TerminalCursorStyle { .block }
     public func scroll(lines: Int) {}
     public func scrollToBottom() {}
+    public var scrollOffset: Int { 0 }
     public var isScrolledBack: Bool { false }
 
     /// Read a cell at the true bottom of the buffer, ignoring any scroll offset.

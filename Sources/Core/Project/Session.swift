@@ -33,6 +33,7 @@ public final class Session: Identifiable {
     public var hasUnreadNotification: Bool = false
     @ObservationIgnored public var lastNotification: TerminalNotification?
     public var detectedPorts: [UInt16] = []
+    public var gitBranch: String?
 
     // Usage stats (accumulated from activity events)
     @ObservationIgnored public let stats = SessionStats()

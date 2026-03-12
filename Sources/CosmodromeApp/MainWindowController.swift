@@ -24,6 +24,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
     private var appearanceObserver: NSObjectProtocol?
     private var fleetOverlayHost: NSHostingView<FleetOverviewView>?
     private var fleetViewVisible = false
+    private var splitView: NSSplitView!
+    private var activityLogSidebarHost: NSHostingView<AnyView>?
+    private var activityLogExpanded = false
 
     /// User's preferred shell from $SHELL, falling back to /bin/zsh.
     private static let defaultShell: String = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
@@ -106,6 +109,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
             height: contentRect.height - statusBarHeight
         )
         let splitView = NSSplitView(frame: splitFrame)
+        self.splitView = splitView
         splitView.isVertical = true
         splitView.dividerStyle = .thin
         splitView.autoresizingMask = [.width, .height]
@@ -257,15 +261,23 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
     // MARK: - NSSplitViewDelegate
 
     func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
-        160 // Sidebar minimum width
+        if dividerIndex == 0 {
+            return 160 // Sidebar minimum width
+        }
+        // Activity log right panel divider: minimum terminal width
+        return splitView.frame.width - 400
     }
 
     func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposedMaximumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
-        280 // Sidebar maximum width
+        if dividerIndex == 0 {
+            return 280 // Sidebar maximum width
+        }
+        // Activity log right panel divider: max panel width
+        return splitView.frame.width - 250
     }
 
     func splitView(_ splitView: NSSplitView, canCollapseSubview subview: NSView) -> Bool {
-        false // Never collapse either pane
+        false // Never collapse any pane
     }
 
     private func restoreOrCreateDefaultProject() {
@@ -543,6 +555,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
             category: "Views"
         ) { [weak self] in
             self?.toggleActivityLog()
+        })
+
+        actions.append(PaletteAction(
+            activityLogExpanded ? "Close Activity Log Overlay" : "Expand Activity Log",
+            icon: "list.bullet.rectangle.portrait",
+            shortcut: "\u{2318}\u{21E7}L",
+            category: "Views"
+        ) { [weak self] in
+            self?.expandActivityLog()
         })
 
         actions.append(PaletteAction(
@@ -899,6 +920,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
 
         case .toggleFleetView:
             toggleFleetView()
+
+        case .expandActivityLog:
+            expandActivityLog()
         }
 
         return true
@@ -928,37 +952,100 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
 
     private func encodeKeyForPTY(_ event: NSEvent) -> Data? {
         let modifiers = event.modifierFlags
+        let hasShift = modifiers.contains(.shift)
+        let hasAlt = modifiers.contains(.option)
+        let hasCtrl = modifiers.contains(.control)
+
+        // xterm modifier parameter: 1 + (shift ? 1 : 0) + (alt ? 2 : 0) + (ctrl ? 4 : 0)
+        let modParam = 1 + (hasShift ? 1 : 0) + (hasAlt ? 2 : 0) + (hasCtrl ? 4 : 0)
+        let hasModifiers = modParam > 1
 
         // Special keys
         switch event.keyCode {
         case 36: return Data([0x0D])   // Return
         case 48:                        // Tab
-            if modifiers.contains(.shift) {
+            if hasShift {
                 return Data([0x1B, 0x5B, 0x5A])  // Shift+Tab → ESC [ Z (back tab)
             }
             return Data([0x09])
         case 51: return Data([0x7F])   // Backspace
         case 53: return Data([0x1B])   // Escape
-        case 123: return Data([0x1B, 0x5B, 0x44]) // Left
-        case 124: return Data([0x1B, 0x5B, 0x43]) // Right
-        case 125: return Data([0x1B, 0x5B, 0x42]) // Down
-        case 126: return Data([0x1B, 0x5B, 0x41]) // Up
-        case 116: return Data([0x1B, 0x5B, 0x35, 0x7E]) // Page Up
-        case 121: return Data([0x1B, 0x5B, 0x36, 0x7E]) // Page Down
-        case 115: return Data([0x1B, 0x5B, 0x48]) // Home
-        case 119: return Data([0x1B, 0x5B, 0x46]) // End
-        case 117: return Data([0x1B, 0x5B, 0x33, 0x7E]) // Delete forward
+
+        // Arrow keys: ESC[1;{mod}{letter} when modified, ESC[{letter} when plain
+        case 123: // Left
+            if hasModifiers { return "\u{1B}[1;\(modParam)D".data(using: .utf8) }
+            return Data([0x1B, 0x5B, 0x44])
+        case 124: // Right
+            if hasModifiers { return "\u{1B}[1;\(modParam)C".data(using: .utf8) }
+            return Data([0x1B, 0x5B, 0x43])
+        case 125: // Down
+            if hasModifiers { return "\u{1B}[1;\(modParam)B".data(using: .utf8) }
+            return Data([0x1B, 0x5B, 0x42])
+        case 126: // Up
+            if hasModifiers { return "\u{1B}[1;\(modParam)A".data(using: .utf8) }
+            return Data([0x1B, 0x5B, 0x41])
+
+        // Navigation keys: ESC[{code};{mod}~ when modified
+        case 116: // Page Up
+            if hasModifiers { return "\u{1B}[5;\(modParam)~".data(using: .utf8) }
+            return Data([0x1B, 0x5B, 0x35, 0x7E])
+        case 121: // Page Down
+            if hasModifiers { return "\u{1B}[6;\(modParam)~".data(using: .utf8) }
+            return Data([0x1B, 0x5B, 0x36, 0x7E])
+        case 115: // Home
+            if hasModifiers { return "\u{1B}[1;\(modParam)H".data(using: .utf8) }
+            return Data([0x1B, 0x5B, 0x48])
+        case 119: // End
+            if hasModifiers { return "\u{1B}[1;\(modParam)F".data(using: .utf8) }
+            return Data([0x1B, 0x5B, 0x46])
+        case 117: // Delete forward
+            if hasModifiers { return "\u{1B}[3;\(modParam)~".data(using: .utf8) }
+            return Data([0x1B, 0x5B, 0x33, 0x7E])
+
+        // Function keys F1-F12
+        case 122: return functionKeyEscape(code: "P", modParam: modParam)   // F1
+        case 120: return functionKeyEscape(code: "Q", modParam: modParam)   // F2
+        case 99:  return functionKeyEscape(code: "R", modParam: modParam)   // F3
+        case 118: return functionKeyEscape(code: "S", modParam: modParam)   // F4
+        case 96:  return "\u{1B}[\(hasModifiers ? "15;\(modParam)" : "15")~".data(using: .utf8)  // F5
+        case 97:  return "\u{1B}[\(hasModifiers ? "17;\(modParam)" : "17")~".data(using: .utf8)  // F6
+        case 98:  return "\u{1B}[\(hasModifiers ? "18;\(modParam)" : "18")~".data(using: .utf8)  // F7
+        case 100: return "\u{1B}[\(hasModifiers ? "19;\(modParam)" : "19")~".data(using: .utf8)  // F8
+        case 101: return "\u{1B}[\(hasModifiers ? "20;\(modParam)" : "20")~".data(using: .utf8)  // F9
+        case 109: return "\u{1B}[\(hasModifiers ? "21;\(modParam)" : "21")~".data(using: .utf8)  // F10
+        case 103: return "\u{1B}[\(hasModifiers ? "23;\(modParam)" : "23")~".data(using: .utf8)  // F11
+        case 111: return "\u{1B}[\(hasModifiers ? "24;\(modParam)" : "24")~".data(using: .utf8)  // F12
+
         default: break
         }
 
         // Ctrl+key
-        if modifiers.contains(.control), let chars = event.charactersIgnoringModifiers {
+        if hasCtrl, let chars = event.charactersIgnoringModifiers {
             if let scalar = chars.unicodeScalars.first {
                 let value = scalar.value
+                // a-z → Ctrl codes 1-26
                 if value >= 0x61 && value <= 0x7A {
                     return Data([UInt8(value - 0x60)])
                 }
+                // Ctrl+special: @[\]^_
+                switch value {
+                case 0x40: return Data([0x00]) // Ctrl+@ → NUL
+                case 0x5B: return Data([0x1B]) // Ctrl+[ → ESC
+                case 0x5C: return Data([0x1C]) // Ctrl+\ → FS
+                case 0x5D: return Data([0x1D]) // Ctrl+] → GS
+                case 0x5E: return Data([0x1E]) // Ctrl+^ → RS
+                case 0x5F: return Data([0x1F]) // Ctrl+_ → US
+                default: break
+                }
             }
+        }
+
+        // Alt/Option as ESC prefix (for Alt+key combos like Alt+b, Alt+f in readline)
+        if hasAlt && !hasCtrl, let chars = event.charactersIgnoringModifiers,
+           let data = chars.data(using: .utf8) {
+            var result = Data([0x1B])
+            result.append(data)
+            return result
         }
 
         // Regular character input
@@ -969,16 +1056,80 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
         return nil
     }
 
+    /// Encode F1-F4 (SS3 format: ESC O {code}) or with modifiers (CSI format: ESC [1;{mod}{code}).
+    private func functionKeyEscape(code: String, modParam: Int) -> Data? {
+        if modParam > 1 {
+            return "\u{1B}[1;\(modParam)\(code)".data(using: .utf8)
+        }
+        return "\u{1B}O\(code)".data(using: .utf8)
+    }
+
     // MARK: - Activity Log
 
     private func toggleActivityLog() {
         activityLogVisible.toggle()
 
         if activityLogVisible {
+            // Close expanded overlay if open
+            if activityLogExpanded {
+                hideActivityLogOverlay()
+                activityLogExpanded = false
+            }
+            showActivityLogSidebar()
+        } else {
+            hideActivityLogSidebar()
+        }
+    }
+
+    private func expandActivityLog() {
+        activityLogExpanded.toggle()
+
+        if activityLogExpanded {
+            // Close sidebar if open
+            if activityLogVisible {
+                hideActivityLogSidebar()
+                activityLogVisible = false
+            }
             showActivityLogOverlay()
         } else {
             hideActivityLogOverlay()
         }
+    }
+
+    private func showActivityLogSidebar() {
+        guard splitView != nil else { return }
+
+        // Remove existing sidebar if any
+        activityLogSidebarHost?.removeFromSuperview()
+
+        let logView = ActivityLogView(
+            projects: projectStore.projects,
+            compact: true,
+            onFocusSession: { [weak self] projectId, sessionId in
+                self?.hideActivityLogSidebar()
+                self?.activityLogVisible = false
+                self?.jumpToSession(projectId: projectId, sessionId: sessionId)
+            },
+            onDismiss: { [weak self] in
+                self?.hideActivityLogSidebar()
+                self?.activityLogVisible = false
+            }
+        )
+
+        let host = NSHostingView(rootView: AnyView(logView))
+        host.frame = NSRect(x: 0, y: 0, width: 280, height: splitView.frame.height)
+        splitView.addArrangedSubview(host)
+        activityLogSidebarHost = host
+
+        // Position the right panel divider
+        let targetPos = splitView.frame.width - 280
+        splitView.setPosition(targetPos, ofDividerAt: 1)
+    }
+
+    private func hideActivityLogSidebar() {
+        activityLogSidebarHost?.removeFromSuperview()
+        activityLogSidebarHost = nil
+        window?.makeFirstResponder(terminalContentView)
     }
 
     private func showActivityLogOverlay() {
@@ -988,14 +1139,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
 
         let logView = ActivityLogView(
             projects: projectStore.projects,
+            compact: false,
             onFocusSession: { [weak self] projectId, sessionId in
                 self?.hideActivityLogOverlay()
-                self?.activityLogVisible = false
+                self?.activityLogExpanded = false
                 self?.jumpToSession(projectId: projectId, sessionId: sessionId)
             },
             onDismiss: { [weak self] in
                 self?.hideActivityLogOverlay()
-                self?.activityLogVisible = false
+                self?.activityLogExpanded = false
             }
         )
 

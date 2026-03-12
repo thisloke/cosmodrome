@@ -14,7 +14,8 @@ struct AgentStatusBarView: View {
                     projectName: entry.projectName,
                     sessionName: entry.sessionName,
                     state: entry.state,
-                    model: entry.model
+                    model: entry.model,
+                    branch: entry.branch
                 )
                 .onTapGesture {
                     onJumpToSession(entry.projectId, entry.sessionId)
@@ -89,6 +90,7 @@ struct AgentStatusBarView: View {
         let sessionName: String
         let state: AgentState
         let model: String?
+        let branch: String?
     }
 
     private var agentEntries: [AgentInfo] {
@@ -102,7 +104,8 @@ struct AgentStatusBarView: View {
                         sessionId: session.id,
                         sessionName: session.name,
                         state: session.agentState,
-                        model: session.agentModel
+                        model: session.agentModel,
+                        branch: session.gitBranch
                     )
                 }
         }
@@ -158,6 +161,7 @@ private struct AgentStatusEntry: View {
     let sessionName: String
     let state: AgentState
     let model: String?
+    let branch: String?
 
     @State private var isHovered = false
 
@@ -172,6 +176,17 @@ private struct AgentStatusEntry: View {
                 .font(Typo.body)
                 .foregroundColor(DS.textPrimary.opacity(0.85))
                 .lineLimit(1)
+
+            if let branch {
+                HStack(spacing: 2) {
+                    Image(systemName: "arrow.triangle.branch")
+                        .font(.system(size: 7))
+                    Text(branch)
+                        .font(Typo.captionMono)
+                        .lineLimit(1)
+                }
+                .foregroundColor(DS.textTertiary)
+            }
         }
         .padding(.horizontal, Spacing.sm)
         .padding(.vertical, Spacing.xs)
@@ -186,7 +201,7 @@ private struct AgentStatusEntry: View {
                 .animation(Anim.quick, value: isHovered)
         )
         .onHover { isHovered = $0 }
-        .help("\(projectName)/\(sessionName)")
+        .help("\(projectName)/\(sessionName)\(branch.map { " (\($0))" } ?? "")")
 
     }
 
