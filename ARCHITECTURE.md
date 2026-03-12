@@ -1,6 +1,6 @@
 # Architecture: Cosmodrome
 
-**Version:** 1.1  
+**Version:** 0.1.0
 **Date:** March 2026
 
 ---
@@ -452,4 +452,8 @@ Two modes: **Normal** (default) and **Command**.
 | Health check HTTP pings                   | Terminal shows process alive/dead, not app health                          |
 | Memory pressure monitor                   | 8 sessions × 10MB = 80MB. macOS has 16-64GB. Not needed.                   |
 | Sub-pixel glyph rendering                 | Retina displays make it imperceptible. Apple deprecated it.                |
-| Plugin system                             | Until v1.0 at earliest                                                     |
+| Plugin system                             | Out of scope                                                               |
+| Worktree management                      | Observe, don't orchestrate — managing git state is outside our scope       |
+| Agent control API / send_input           | We never write to agent PTYs. Read-only observation only.                  |
+| Linux / cross-platform                   | Native macOS only. Metal, AppKit, CoreText are non-portable by design.     |
+| External terminal orchestration          | We don't control other terminals (Ghostty, iTerm2, etc.)                   |

@@ -72,7 +72,7 @@ Record terminal sessions in asciicast v2 format for playback and sharing.
 
 ### MCP Server
 
-JSON-RPC 2.0 server over stdio for programmatic control: list projects, query agent states, send input, start recordings, get fleet stats, get activity log.
+JSON-RPC 2.0 server over stdio for programmatic observation: list projects, query agent states, read terminal content, get fleet stats, get activity log.
 
 ### CLI Control Plane
 
@@ -83,12 +83,15 @@ JSON-RPC 2.0 server over stdio for programmatic control: list projects, query ag
 - **Command palette** (`Cmd+P`) for quick access to all actions
 - **Modal keybindings** with vim-style command mode (`Ctrl+Space`)
 - **Theme system** with dark, light, and custom YAML themes
-- **Git worktree integration** for multi-branch workflows
 - **OSC 133 semantic prompt tracking** for shell integration
 - **Session persistence** with scrollback restoration across restarts
 - **Native macOS notifications** for agent state changes
 - **Grid and Focus layout modes** -- grid for overview, focus for deep work
 - **Font zoom** (`Cmd+=`/`Cmd+-`) with persistence
+
+### Philosophy
+
+**Observe, never orchestrate.** Cosmodrome watches what your agents do and tells you what happened. It never sends input to agents, never auto-triggers actions, and never controls agent behavior. The developer is always in the loop.
 
 ---
 
@@ -203,8 +206,6 @@ cosmoctl status
 cosmoctl list-projects
 cosmoctl list-sessions
 cosmoctl focus <session-id>
-cosmoctl send <session-id> "npm test"
-cosmoctl new-session --project <id> --name "Claude" --command "claude" --agent
 cosmoctl content <session-id> --lines 50
 
 # Fleet and activity
@@ -222,7 +223,6 @@ When launched with `--mcp`, Cosmodrome exposes these tools via JSON-RPC 2.0 over
 | `list_projects` | List all projects with agent states |
 | `list_sessions` | List sessions for a project |
 | `get_session_content` | Get visible terminal content |
-| `send_input` | Send keyboard input to a session |
 | `get_agent_states` | All agent states across all projects |
 | `focus_session` | Switch focus to a session |
 | `start_recording` / `stop_recording` | Asciicast session recording |

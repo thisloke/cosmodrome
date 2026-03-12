@@ -68,18 +68,6 @@ public final class MCPServer {
             ],
         ],
         [
-            "name": "send_input",
-            "description": "Send keyboard input to a session's terminal.",
-            "inputSchema": [
-                "type": "object",
-                "properties": [
-                    "session_id": ["type": "string", "description": "Session UUID"],
-                    "text": ["type": "string", "description": "Text to send (supports \\n for enter)"],
-                ],
-                "required": ["session_id", "text"],
-            ],
-        ],
-        [
             "name": "get_agent_states",
             "description": "Get all agent states across all projects.",
             "inputSchema": [

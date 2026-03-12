@@ -586,40 +586,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
             }
         }
 
-        // Git worktree actions (if current project is in a git repo)
-        if let project = projectStore.activeProject, let rootPath = project.rootPath {
-            if GitWorktree.isGitRepo(at: rootPath) {
-                if let branch = GitWorktree.currentBranch(in: rootPath) {
-                    actions.append(PaletteAction(
-                        "Git: Current branch",
-                        subtitle: branch,
-                        icon: "arrow.triangle.branch"
-                    ) {})
-                }
-
-                let worktrees = GitWorktree.list(in: rootPath)
-                if worktrees.count > 1 {
-                    for wt in worktrees where !wt.isMain {
-                        actions.append(PaletteAction(
-                            "Switch to worktree: \(wt.branch)",
-                            subtitle: wt.path,
-                            icon: "arrow.triangle.branch"
-                        ) { [weak self] in
-                            self?.switchToWorktree(wt, project: project)
-                        })
-                    }
-                }
-
-                actions.append(PaletteAction(
-                    "Git: New worktree...",
-                    subtitle: "Create branch + worktree for agent isolation",
-                    icon: "plus"
-                ) { [weak self] in
-                    self?.createWorktree(for: project)
-                })
-            }
-        }
-
         // Jump to attention
         let attentionSessions = projectStore.sessionsNeedingAttention
         for entry in attentionSessions {
@@ -716,42 +682,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
             object: nil, queue: .main
         ) { [weak self] _ in
             self?.syncWithSystemAppearance()
-        }
-    }
-
-    // MARK: - Git Worktree
-
-    private func switchToWorktree(_ wt: GitWorktree.WorktreeInfo, project: Project) {
-        // Create a new session in the worktree directory
-        let session = Session(
-            name: "wt/\(wt.branch)",
-            command: Self.defaultShell,
-            cwd: wt.path
-        )
-        project.sessions.append(session)
-        do { try sessionManager.startSession(session) } catch {}
-        setFocusedSession(session.id)
-        refreshTerminalView()
-    }
-
-    private func createWorktree(for project: Project) {
-        guard let rootPath = project.rootPath else { return }
-
-        let branchName = "agent/\(UUID().uuidString.prefix(8))"
-        let worktreePath = (rootPath as NSString)
-            .deletingLastPathComponent
-            .appending("/\((rootPath as NSString).lastPathComponent)-\(branchName.replacingOccurrences(of: "/", with: "-"))")
-
-        if GitWorktree.create(in: rootPath, branch: branchName, path: worktreePath) {
-            let session = Session(
-                name: "wt/\(branchName)",
-                command: Self.defaultShell,
-                cwd: worktreePath
-            )
-            project.sessions.append(session)
-            do { try sessionManager.startSession(session) } catch {}
-            setFocusedSession(session.id)
-            refreshTerminalView()
         }
     }
 
@@ -1333,60 +1263,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
             }
             return .success("focused")
 
-        case "send":
-            guard let sessionIdStr = request.args?["session_id"],
-                  let sessionId = UUID(uuidString: sessionIdStr),
-                  let text = request.args?["text"] else {
-                return .failure("Missing session_id or text")
-            }
-            let resolved = text.replacingOccurrences(of: "\\n", with: "\n")
-            if let data = resolved.data(using: .utf8) {
-                for project in projectStore.projects {
-                    if let session = project.sessions.first(where: { $0.id == sessionId }), session.ptyFD >= 0 {
-                        sessionManager.multiplexer.send(to: session.ptyFD, data: data)
-                        return .success("sent")
-                    }
-                }
-            }
-            return .failure("Session not found or not running")
-
-        case "new-session":
-            let projectIdStr = request.args?["project_id"]
-            let command = request.args?["command"] ?? Self.defaultShell
-            let name = request.args?["name"] ?? "Shell"
-            let isAgent = request.args?["agent"] == "true"
-
-            var result = ""
-            DispatchQueue.main.sync {
-                let project: Project?
-                if let pidStr = projectIdStr, let pid = UUID(uuidString: pidStr) {
-                    project = self.projectStore.projects.first { $0.id == pid }
-                } else {
-                    project = self.projectStore.activeProject
-                }
-                guard let project else {
-                    result = "error:Project not found"
-                    return
-                }
-                let session = Session(
-                    name: name,
-                    command: command,
-                    cwd: project.rootPath ?? FileManager.default.homeDirectoryForCurrentUser.path,
-                    isAgent: isAgent,
-                    agentType: isAgent ? "claude" : nil
-                )
-                project.sessions.append(session)
-                do {
-                    try self.sessionManager.startSession(session)
-                    self.refreshTerminalView()
-                    self.focusSession(session.id)
-                    result = session.id.uuidString
-                } catch {
-                    result = "error:\(error)"
-                }
-            }
-            return result.hasPrefix("error:") ? .failure(String(result.dropFirst(6))) : .success(result)
-
         case "status":
             var info: [String: Any] = [
                 "projects": projectStore.projects.count,
@@ -1518,7 +1394,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
             return .success("[]")
 
         default:
-            return .failure("Unknown command: \(request.command). Available: list-projects, list-sessions, focus, send, new-session, status, content, fleet-stats, activity")
+            return .failure("Unknown command: \(request.command). Available: list-projects, list-sessions, focus, status, content, fleet-stats, activity")
         }
     }
 

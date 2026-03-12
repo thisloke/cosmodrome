@@ -4,6 +4,15 @@ All notable changes to Cosmodrome are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Removed
+- **`send_input` MCP tool** -- removed to align with "observe, never orchestrate" philosophy. Cosmodrome no longer writes to agent PTYs.
+- **`cosmoctl send` CLI command** -- removed for the same reason.
+- **`cosmoctl new-session` CLI command** -- removed; session creation is a UI-only operation.
+- **Git worktree integration** -- removed `GitWorktree` and all worktree management from the command palette. Worktree management is outside Cosmodrome's scope.
+- **`Prototypes/GhosttyAppleScript/`** -- removed external terminal orchestration prototype.
+
 ## [0.1.0] - 2026-03-12
 
 First release. A native macOS terminal for developers running multiple AI agents in parallel.
