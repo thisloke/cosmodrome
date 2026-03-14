@@ -284,8 +284,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
                 projectStore.setActiveProject(id: activeId)
             }
 
-            // Restore font size
-            if let savedSize = state.fontSize {
+            // Restore font size (only if user config doesn't specify one)
+            if userConfig?.font?.size == nil, let savedSize = state.fontSize {
                 terminalContentView.setFontSize(CGFloat(savedSize))
             }
             syncFontSizeState()
