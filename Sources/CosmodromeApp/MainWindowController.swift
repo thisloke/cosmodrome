@@ -848,6 +848,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
             return true
         }
 
+        // Let Cmd+Q pass through to the menu system for app termination
+        if event.modifierFlags.contains(.command) && event.keyCode == 12 { // 'q'
+            return false
+        }
+
         guard let action = keybindingManager.match(event: event) else {
             // In command mode, suppress all keys that aren't bound
             if keybindingManager.suppressesPTYInput {
