@@ -52,6 +52,7 @@ final class TerminalContentView: NSView {
     // (viewportRow + scrollbackCount - scrollOffset) so they survive scrolling.
     private(set) var selection: TerminalSelection?
     private var isDragging = false
+    private var autoScrollTimer: Timer?
     private var lastBackingScale: CGFloat = 0
 
     // Grid layout constants
@@ -835,28 +836,38 @@ final class TerminalContentView: NSView {
               let pair = sessions.first(where: { $0.session.id == focusedId }) else { return }
         let point = convert(event.locationInWindow, from: nil)
 
-        // Auto-scroll when dragging near edges
-        let edgeZone: CGFloat = 20
+        // Auto-scroll when dragging outside the terminal grid
+        var scrollDir = 0
         if let entry = cachedEntries.first(where: { $0.sessionId == focusedId }) {
-            if point.y < entry.frame.minY + edgeZone {
-                // Near bottom edge (NSView coords) -> scroll down (newer content)
+            if point.y < entry.frame.minY {
+                // Below bottom edge (NSView coords) -> scroll down (newer content)
+                scrollDir = -1
                 pair.backend.scroll(lines: -2)
-            } else if point.y > entry.frame.maxY - edgeZone {
-                // Near top edge (NSView coords) -> scroll up (older content)
+            } else if point.y > entry.frame.maxY {
+                // Above top edge (NSView coords) -> scroll up (older content)
+                scrollDir = 1
                 pair.backend.scroll(lines: 2)
             }
         }
 
-        if let cell = cellAt(point: point) {
-            let absRow = cell.row + pair.backend.scrollbackCount - pair.backend.scrollOffset
-            sel.endRow = absRow
-            sel.endCol = cell.col
-            selection = sel
-            updateLayout() // Updates renderer.selection with viewport conversion
+        // Start/stop autoscroll timer for continuous scrolling while mouse is held outside
+        if scrollDir != 0 {
+            startAutoScroll(direction: scrollDir, pair: pair, selection: &sel)
+        } else {
+            stopAutoScroll()
         }
+
+        // Use clamped cell coordinates so selection extends to edge when mouse is outside
+        let cell = cellAtClamped(point: point)
+        let absRow = cell.row + pair.backend.scrollbackCount - pair.backend.scrollOffset
+        sel.endRow = absRow
+        sel.endCol = cell.col
+        selection = sel
+        updateLayout()
     }
 
     override func mouseUp(with event: NSEvent) {
+        stopAutoScroll()
         if isDragging, let sel = selection {
             // Clear selection if it's empty (single click, no drag)
             if sel.startRow == sel.endRow && sel.startCol == sel.endCol {
@@ -907,6 +918,56 @@ final class TerminalContentView: NSView {
     }
 
     // MARK: - Private Helpers
+
+    /// Like `cellAt` but clamps to the grid edges instead of returning nil.
+    /// Used during drag selection so the endpoint stays at the edge when the mouse
+    /// moves outside the terminal grid.
+    private func cellAtClamped(point: NSPoint) -> (row: Int, col: Int) {
+        if let cell = cellAt(point: point) { return cell }
+        // Mouse is outside grid — clamp to nearest edge
+        guard let _ = renderer,
+              let focusedId = focusedSessionId,
+              let entry = cachedEntries.first(where: { $0.sessionId == focusedId }),
+              let pair = sessions.first(where: { $0.session.id == focusedId }) else { return (row: 0, col: 0) }
+        let backend = pair.backend
+        let isGrid = sessions.count > 1
+        var cellFrame = entry.frame
+        if isGrid { cellFrame = cellFrame.insetBy(dx: gridGap / 2, dy: gridGap / 2) }
+        let headerOffset: CGFloat = isGrid ? sessionHeaderHeight : 0
+        let midY = cellFrame.origin.y + (cellFrame.height - headerOffset) / 2
+        // Above midpoint (NSView coords) → top of grid (row 0), below → bottom (last row)
+        let row = point.y > midY ? 0 : backend.rows - 1
+        let col = point.x < cellFrame.midX ? 0 : backend.cols - 1
+        return (row: row, col: col)
+    }
+
+    private func startAutoScroll(direction: Int, pair: (session: Session, backend: TerminalBackend), selection: inout TerminalSelection) {
+        guard autoScrollTimer == nil else { return }
+        let sessionId = pair.session.id
+        let scrollAmount = direction > 0 ? 2 : -2
+        autoScrollTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+            guard let self, self.isDragging,
+                  var sel = self.selection,
+                  let p = self.sessions.first(where: { $0.session.id == sessionId }) else {
+                self?.stopAutoScroll()
+                return
+            }
+            p.backend.scroll(lines: scrollAmount)
+            // Extend selection to the edge row after scrolling
+            let edgeRow = scrollAmount > 0 ? 0 : p.backend.rows - 1
+            let edgeCol = scrollAmount > 0 ? 0 : p.backend.cols - 1
+            let absRow = edgeRow + p.backend.scrollbackCount - p.backend.scrollOffset
+            sel.endRow = absRow
+            sel.endCol = edgeCol
+            self.selection = sel
+            self.updateLayout()
+        }
+    }
+
+    private func stopAutoScroll() {
+        autoScrollTimer?.invalidate()
+        autoScrollTimer = nil
+    }
 
     /// Map a point (in NSView coordinates) to a cell (row, col) in the focused session.
     private func cellAt(point: NSPoint) -> (row: Int, col: Int)? {

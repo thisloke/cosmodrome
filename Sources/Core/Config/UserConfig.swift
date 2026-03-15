@@ -112,14 +112,12 @@ public struct UserConfig: Codable {
         public var needsInput: Bool
         public var error: Bool
         public var completed: Bool
-        public var sound: Bool
         public var idleThreshold: Int  // seconds
 
         enum CodingKeys: String, CodingKey {
             case needsInput = "needs_input"
             case error
             case completed
-            case sound
             case idleThreshold = "idle_threshold"
         }
 
@@ -127,13 +125,11 @@ public struct UserConfig: Codable {
             needsInput: Bool = true,
             error: Bool = true,
             completed: Bool = false,
-            sound: Bool = false,
             idleThreshold: Int = 30
         ) {
             self.needsInput = needsInput
             self.error = error
             self.completed = completed
-            self.sound = sound
             self.idleThreshold = idleThreshold
         }
 
@@ -143,7 +139,6 @@ public struct UserConfig: Codable {
             needsInput = try container.decodeIfPresent(Bool.self, forKey: .needsInput) ?? defaults.needsInput
             error = try container.decodeIfPresent(Bool.self, forKey: .error) ?? defaults.error
             completed = try container.decodeIfPresent(Bool.self, forKey: .completed) ?? defaults.completed
-            sound = try container.decodeIfPresent(Bool.self, forKey: .sound) ?? defaults.sound
             idleThreshold = try container.decodeIfPresent(Int.self, forKey: .idleThreshold) ?? defaults.idleThreshold
         }
 

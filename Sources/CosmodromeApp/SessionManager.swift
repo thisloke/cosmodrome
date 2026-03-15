@@ -161,6 +161,9 @@ final class SessionManager {
         session.taskStartedAt = nil
         session.filesChangedInTask = []
 
+        // Detect git branch immediately at start (don't wait for first PTY output)
+        updateGitBranch(session: session)
+
         let onDirty = onSessionDirty ?? {}
         let sessionId = session.id
 
@@ -388,7 +391,7 @@ final class SessionManager {
         session.taskStartedAt = nil
         session.filesChangedInTask = []
         session.detectedPorts = []
-        session.gitBranch = nil
+
         stateLock.lock()
         defer { stateLock.unlock() }
         lastStatusParse.removeValue(forKey: session.id)

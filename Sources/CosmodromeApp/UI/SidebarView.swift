@@ -317,7 +317,7 @@ private struct ProjectRow: View {
             Divider()
             Button("New Shell Session") { onNewSession() }
             Divider()
-            Button("Delete Project", role: .destructive) { onDelete() }
+            Button("Close Project", role: .destructive) { onDelete() }
         }
     }
 

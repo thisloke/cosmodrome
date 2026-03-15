@@ -19,7 +19,7 @@ enum AgentNotifications {
 
     static func requestPermission() {
         guard isAvailable else { return }
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert]) { _, _ in }
     }
 
     static func notifyAgentState(project: Project, session: Session) {
@@ -75,11 +75,6 @@ enum AgentNotifications {
 
         content.interruptionLevel = .timeSensitive
 
-        // Sound preference
-        if config.sound {
-            content.sound = .default
-        }
-
         content.userInfo = [
             "projectId": project.id.uuidString,
             "sessionId": session.id.uuidString,
@@ -103,10 +98,6 @@ enum AgentNotifications {
             : notification.title
         content.body = notification.body
         content.interruptionLevel = .active
-
-        if config.sound {
-            content.sound = .default
-        }
 
         content.userInfo = [
             "projectId": project.id.uuidString,
