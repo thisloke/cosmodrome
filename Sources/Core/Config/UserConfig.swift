@@ -68,17 +68,28 @@ public struct UserConfig: Codable {
     public var theme: String?
     public var window: WindowConfig?
     public var notifications: NotificationConfig?
+    public var storage: StorageConfig?
+
+    /// Set by the app at startup for global access (e.g., cleanup timer).
+    public static var current: UserConfig?
+
+    /// Storage retention in days, with default.
+    public var storageRetentionDays: Int {
+        storage?.retentionDays ?? 90
+    }
 
     public init(
         font: FontConfig? = nil,
         theme: String? = nil,
         window: WindowConfig? = nil,
-        notifications: NotificationConfig? = nil
+        notifications: NotificationConfig? = nil,
+        storage: StorageConfig? = nil
     ) {
         self.font = font
         self.theme = theme
         self.window = window
         self.notifications = notifications
+        self.storage = storage
     }
 
     public struct FontConfig: Codable {
@@ -108,22 +119,62 @@ public struct UserConfig: Codable {
         }
     }
 
-    public struct NotificationConfig: Codable {
-        public var agentNeedsInput: Bool?
-        public var agentError: Bool?
-        public var processExited: Bool?
+    public struct StorageConfig: Codable {
+        public var enabled: Bool?
+        public var retentionDays: Int?
 
         enum CodingKeys: String, CodingKey {
-            case agentNeedsInput = "agent_needs_input"
-            case agentError = "agent_error"
-            case processExited = "process_exited"
+            case enabled
+            case retentionDays = "retention_days"
         }
 
-        public init(agentNeedsInput: Bool? = nil, agentError: Bool? = nil, processExited: Bool? = nil) {
-            self.agentNeedsInput = agentNeedsInput
-            self.agentError = agentError
-            self.processExited = processExited
+        public init(enabled: Bool? = nil, retentionDays: Int? = nil) {
+            self.enabled = enabled
+            self.retentionDays = retentionDays
         }
+    }
+
+    public struct NotificationConfig: Codable {
+        public var needsInput: Bool
+        public var error: Bool
+        public var completed: Bool
+        public var sound: Bool
+        public var idleThreshold: Int  // seconds
+
+        enum CodingKeys: String, CodingKey {
+            case needsInput = "needs_input"
+            case error
+            case completed
+            case sound
+            case idleThreshold = "idle_threshold"
+        }
+
+        public init(
+            needsInput: Bool = true,
+            error: Bool = true,
+            completed: Bool = false,
+            sound: Bool = false,
+            idleThreshold: Int = 30
+        ) {
+            self.needsInput = needsInput
+            self.error = error
+            self.completed = completed
+            self.sound = sound
+            self.idleThreshold = idleThreshold
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            let defaults = NotificationConfig()
+            needsInput = try container.decodeIfPresent(Bool.self, forKey: .needsInput) ?? defaults.needsInput
+            error = try container.decodeIfPresent(Bool.self, forKey: .error) ?? defaults.error
+            completed = try container.decodeIfPresent(Bool.self, forKey: .completed) ?? defaults.completed
+            sound = try container.decodeIfPresent(Bool.self, forKey: .sound) ?? defaults.sound
+            idleThreshold = try container.decodeIfPresent(Int.self, forKey: .idleThreshold) ?? defaults.idleThreshold
+        }
+
+        /// Default configuration used when no user config is provided.
+        public static let `default` = NotificationConfig()
     }
 }
 

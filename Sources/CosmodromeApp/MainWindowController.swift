@@ -2,6 +2,19 @@ import AppKit
 import Core
 import SwiftUI
 
+/// Custom NSSplitView that hides the divider line.
+/// The sidebar and content area have different background shades (DS.bgSidebar vs DS.bgPrimary),
+/// so the color contrast naturally creates the visual boundary without a hard line.
+private final class InvisibleDividerSplitView: NSSplitView {
+    override var dividerColor: NSColor {
+        .clear
+    }
+
+    override var dividerThickness: CGFloat {
+        1  // Keep 1px for resize handle, but the color is transparent
+    }
+}
+
 final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitViewDelegate {
     let projectStore = ProjectStore()
     private(set) var sessionManager: SessionManager!
@@ -13,6 +26,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
     private var completionBarHost: NSHostingView<AnyView>?
     private var activityLogVisible = false
     private var isDarkTheme = true
+    private var customTheme: Theme?
     private var mcpServer: MCPServer?
     private var mcpBridge: MCPBridge?
     private var hookServer: HookServer?
@@ -28,12 +42,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
     private var activityLogSidebarHost: NSHostingView<AnyView>?
     private var activityLogExpanded = false
     private let userConfig: UserConfig?
+    private var eventStore: EventStore?
+    private var eventPersister: EventPersister?
 
     /// User's preferred shell from $SHELL, falling back to /bin/zsh.
     private static let defaultShell: String = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
 
     init() {
         self.userConfig = Self.loadUserConfig()
+        UserConfig.current = self.userConfig
         // Clear any saved frame from previous broken runs
         NSWindow.removeFrame(usingName: "CosmodromeMain")
 
@@ -52,8 +69,20 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
         super.init(window: window)
         window.delegate = self
 
+        // Wire up notification preferences from user config
+        if let notifConfig = userConfig?.notifications {
+            AgentNotifications.config = notifConfig
+        }
+
+        // Track mouse interactions for notification idle threshold
+        NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .scrollWheel]) { event in
+            AgentNotifications.lastInteractionTime = Date()
+            return event
+        }
+
         sessionManager = SessionManager(projectStore: projectStore)
         keybindingManager = KeybindingManager()
+        setupPersistence()
         setupUI()
         setupMCP()
         setupHookServer()
@@ -61,6 +90,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
         setupCompletionActions()
         setupTerminalNotifications()
         restoreOrCreateDefaultProject()
+        customTheme = Self.resolveTheme(named: userConfig?.theme)
         syncWithSystemAppearance()
         observeAppearanceChanges()
     }
@@ -110,7 +140,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
             width: contentRect.width,
             height: contentRect.height - statusBarHeight
         )
-        let splitView = NSSplitView(frame: splitFrame)
+        let splitView = InvisibleDividerSplitView(frame: splitFrame)
         self.splitView = splitView
         splitView.isVertical = true
         splitView.dividerStyle = .thin
@@ -194,6 +224,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
 
         // Command palette overlay — positioned over terminal content area only
         let overlay = NSHostingView(rootView: CommandPaletteView(state: paletteState))
+        overlay.wantsLayer = true
+        overlay.layer?.zPosition = 100  // Above session header/label layers (zPosition 11-13)
         overlay.frame = terminalContentView.bounds
         overlay.autoresizingMask = [.width, .height]
         overlay.isHidden = true
@@ -329,6 +361,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
             createDefaultProject()
         }
 
+        wireActivityLogPersistence()
         refreshTerminalView()
         window?.makeFirstResponder(terminalContentView)
     }
@@ -361,10 +394,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
     }
 
     private func focusSession(_ id: UUID) {
-        // Clear unread notification when focusing
+        // Clear unread indicators when focusing
         if let project = projectStore.activeProject,
            let session = project.sessions.first(where: { $0.id == id }) {
             session.hasUnreadNotification = false
+            session.hasUnreadStateChange = false
             AgentNotifications.clearNotification(for: session)
         }
         terminalContentView.focusSession(id)
@@ -410,6 +444,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
             )
             projectStore.addProject(project)
             projectStore.setActiveProject(id: project.id)
+            self.wireActivityLogPersistence()
 
             do {
                 try self.sessionManager.startSession(session)
@@ -446,6 +481,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
                 sessions: [session]
             )
             projectStore.addProject(project)
+            wireActivityLogPersistence()
             do { try sessionManager.startSession(session) } catch {}
             refreshTerminalView()
         }
@@ -577,18 +613,43 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
             self?.terminalContentView.toggleFocus()
         })
 
+        // Built-in themes
+        let activeThemeName = customTheme?.name ?? (isDarkTheme ? "Dark" : "Light")
         actions.append(PaletteAction(
-            "Dark Mode",
-            subtitle: isDarkTheme ? "Switch to light" : "Switch to dark",
-            icon: isDarkTheme ? "moon.fill" : "sun.max.fill",
-            category: "Views",
-            isToggle: true,
-            toggleState: isDarkTheme
+            "Theme: Dark",
+            subtitle: activeThemeName == "Dark" ? "Active" : nil,
+            icon: "moon.fill",
+            category: "Themes"
         ) { [weak self] in
             guard let self else { return }
-            self.isDarkTheme.toggle()
-            self.applyTheme(self.isDarkTheme ? .dark : .light)
+            self.customTheme = nil
+            self.isDarkTheme = true
+            self.applyTheme(.dark)
         })
+        actions.append(PaletteAction(
+            "Theme: Light",
+            subtitle: activeThemeName == "Light" ? "Active" : nil,
+            icon: "sun.max.fill",
+            category: "Themes"
+        ) { [weak self] in
+            guard let self else { return }
+            self.customTheme = nil
+            self.isDarkTheme = false
+            self.applyTheme(.light)
+        })
+        // Custom themes from bundle and user directory
+        for (name, theme) in Self.availableCustomThemes() {
+            actions.append(PaletteAction(
+                "Theme: \(name)",
+                subtitle: activeThemeName == name ? "Active" : nil,
+                icon: "paintpalette",
+                category: "Themes"
+            ) { [weak self] in
+                guard let self else { return }
+                self.customTheme = theme
+                self.applyTheme(theme)
+            })
+        }
 
         // --- Sessions ---
         if let project = projectStore.activeProject {
@@ -712,20 +773,91 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
     // MARK: - Theme
 
     private func applyTheme(_ theme: Theme) {
+        ThemeState.shared.apply(theme)
         terminalContentView.renderer?.applyTheme(theme, metalView: terminalContentView.metalView)
         let bg = parseHexColor(theme.colors.background) ?? (r: Float(0.1), g: Float(0.1), b: Float(0.12))
         window?.backgroundColor = NSColor(
             red: CGFloat(bg.r), green: CGFloat(bg.g), blue: CGFloat(bg.b), alpha: 1.0
         )
-        // Sync window chrome with theme — this triggers DS adaptive colors to re-resolve
-        window?.appearance = NSAppearance(named: theme.name == "Light" ? .aqua : .darkAqua)
+        // Sync window chrome with theme — detect light vs dark by background luminance
+        let isLight = isLightBackground(r: bg.r, g: bg.g, b: bg.b)
+        window?.appearance = NSAppearance(named: isLight ? .aqua : .darkAqua)
         // Refresh CALayer overlays (they use resolved CGColors, not dynamic)
         terminalContentView.updateLayout()
     }
 
     private func syncWithSystemAppearance() {
-        isDarkTheme = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        applyTheme(isDarkTheme ? .dark : .light)
+        if let custom = customTheme {
+            applyTheme(custom)
+        } else {
+            isDarkTheme = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            applyTheme(isDarkTheme ? .dark : .light)
+        }
+    }
+
+    /// Resolve a theme name from user config to a Theme object.
+    /// Checks bundled Resources/Themes/ first, then falls back to built-in dark/light.
+    private static func resolveTheme(named name: String?) -> Theme? {
+        guard let name, name != "dark", name != "light" else { return nil }
+
+        if let bundleURL = Bundle.main.url(forResource: name, withExtension: "yml", subdirectory: "Themes") {
+            do {
+                return try ConfigParser().parseTheme(at: bundleURL.path)
+            } catch {
+                FileHandle.standardError.write(
+                    "[Cosmodrome] Failed to load theme '\(name)': \(error)\n".data(using: .utf8)!
+                )
+            }
+        }
+
+        let userThemePath = NSString(string: "~/.config/cosmodrome/themes/\(name).yml").expandingTildeInPath
+        if FileManager.default.fileExists(atPath: userThemePath) {
+            do {
+                return try ConfigParser().parseTheme(at: userThemePath)
+            } catch {
+                FileHandle.standardError.write(
+                    "[Cosmodrome] Failed to load user theme '\(name)': \(error)\n".data(using: .utf8)!
+                )
+            }
+        }
+
+        return nil
+    }
+
+    /// Discover custom themes from bundled Resources/Themes/ and ~/.config/cosmodrome/themes/.
+    /// Returns (displayName, Theme) pairs, excluding built-in dark/light.
+    private static func availableCustomThemes() -> [(String, Theme)] {
+        var results: [(String, Theme)] = []
+        let parser = ConfigParser()
+
+        // Bundled themes
+        if let themesURL = Bundle.main.url(forResource: "Themes", withExtension: nil) ?? Bundle.main.resourceURL?.appendingPathComponent("Themes"),
+           let files = try? FileManager.default.contentsOfDirectory(atPath: themesURL.path) {
+            for file in files.sorted() where file.hasSuffix(".yml") {
+                let name = String(file.dropLast(4))  // remove .yml
+                if name == "dark" || name == "light" { continue }
+                let path = themesURL.appendingPathComponent(file).path
+                if let theme = try? parser.parseTheme(at: path) {
+                    results.append((theme.name, theme))
+                }
+            }
+        }
+
+        // User themes from ~/.config/cosmodrome/themes/
+        let userDir = NSString(string: "~/.config/cosmodrome/themes").expandingTildeInPath
+        if let files = try? FileManager.default.contentsOfDirectory(atPath: userDir) {
+            for file in files.sorted() where file.hasSuffix(".yml") {
+                let path = (userDir as NSString).appendingPathComponent(file)
+                if let theme = try? parser.parseTheme(at: path) {
+                    // Skip if already added from bundle with same name
+                    if !results.contains(where: { $0.0 == theme.name }) {
+                        results.append((theme.name, theme))
+                    }
+                }
+            }
+        }
+
+        return results
     }
 
     private func observeAppearanceChanges() {
@@ -764,6 +896,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
     // MARK: - Keybindings
 
     func handleKeyEvent(_ event: NSEvent) -> Bool {
+        // Track user interaction for notification idle threshold
+        AgentNotifications.lastInteractionTime = Date()
+
         // If command palette is visible, handle its input
         if paletteState.isVisible {
             switch event.keyCode {
@@ -1338,6 +1473,45 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
         self.mcpBridge = bridge
     }
 
+    private func setupPersistence() {
+        do {
+            let store = try EventStore.defaultStore()
+            let persister = EventPersister(store: store)
+            self.eventStore = store
+            self.eventPersister = persister
+            sessionManager.eventStore = store
+            sessionManager.eventPersister = persister
+            sessionManager.patternLearner = PatternLearner(store: store)
+            sessionManager.costPredictor = CostPredictor(store: store)
+            sessionManager.workflowMiner = WorkflowMiner(store: store)
+
+            // Wire activity log persistence for all projects
+            wireActivityLogPersistence()
+
+            // Schedule daily cleanup
+            let cleanupTimer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+            cleanupTimer.schedule(deadline: .now() + 3600, repeating: 86400)
+            cleanupTimer.setEventHandler { [weak store] in
+                let retentionDays = UserConfig.current?.storageRetentionDays ?? 90
+                try? store?.cleanup(eventRetentionDays: retentionDays)
+            }
+            cleanupTimer.resume()
+        } catch {
+            // Persistence is optional — app works fine without it
+            NSLog("Cosmodrome: failed to initialize event persistence: \(error)")
+        }
+    }
+
+    /// Wire onEventsAppended for all project activity logs to the persister.
+    private func wireActivityLogPersistence() {
+        guard let persister = eventPersister else { return }
+        for project in projectStore.projects {
+            project.activityLog.onEventsAppended = { [weak persister] events in
+                persister?.buffer(events: events)
+            }
+        }
+    }
+
     private func setupHookServer() {
         let server = HookServer()
         let socketPath = server.start()
@@ -1586,8 +1760,80 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
             }
             return .success("[]")
 
+        case "fleet":
+            // Rich fleet status with interpretations and urgency.
+            // Each session includes narrative headline, interpretation, urgency score/level.
+            var sessions: [[String: Any]] = []
+            for project in projectStore.projects {
+                for session in project.sessions {
+                    var s: [String: Any] = [
+                        "id": session.id.uuidString,
+                        "name": session.name,
+                        "project": project.name,
+                        "state": session.agentState.rawValue,
+                        "running": session.isRunning,
+                        "cost": session.stats.totalCost,
+                        "tasks": session.stats.totalTasks,
+                        "files_changed": session.stats.totalFilesChanged,
+                        "errors": session.stats.totalErrors,
+                        "uptime": session.stats.uptimeString,
+                    ]
+                    if let model = session.agentModel { s["model"] = model }
+                    if let agentType = session.agentType { s["agent_type"] = agentType }
+                    if let velocity = session.stats.costPerMinute {
+                        s["cost_per_minute"] = velocity
+                    }
+
+                    // Narrative and interpretation
+                    if let narrative = session.narrative {
+                        s["headline"] = narrative.headline
+                        if let interp = narrative.interpretation { s["interpretation"] = interp }
+                        s["needs_attention"] = narrative.needsAttention
+                        if let urgency = narrative.urgency {
+                            s["urgency_score"] = urgency.value
+                            s["urgency_level"] = urgency.level.rawValue
+                            s["urgency_reason"] = urgency.reason
+                        }
+                    }
+
+                    // Stuck info
+                    if let stuck = session.stuckInfo {
+                        s["stuck"] = true
+                        s["stuck_retries"] = stuck.retryCount
+                        s["stuck_duration"] = stuck.duration
+                        if let pattern = stuck.pattern { s["stuck_pattern"] = pattern }
+                        s["stuck_kind"] = stuck.kind.rawValue
+                    }
+
+                    sessions.append(s)
+                }
+            }
+
+            // Sort by urgency (highest first)
+            sessions.sort { s1, s2 in
+                let u1 = s1["urgency_score"] as? Int ?? 0
+                let u2 = s2["urgency_score"] as? Int ?? 0
+                return u1 > u2
+            }
+
+            let fleet: [String: Any] = [
+                "sessions": sessions,
+                "total_cost": projectStore.fleetTotalCost,
+                "total_tasks": projectStore.fleetTotalTasks,
+                "agents_total": projectStore.fleetAgentCounts.total,
+                "agents_working": projectStore.fleetAgentCounts.working,
+                "agents_idle": projectStore.fleetAgentCounts.idle,
+                "agents_needs_input": projectStore.fleetAgentCounts.needsInput,
+                "agents_error": projectStore.fleetAgentCounts.error,
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: fleet, options: [.sortedKeys]),
+               let json = String(data: data, encoding: .utf8) {
+                return .success(json)
+            }
+            return .success("{}")
+
         default:
-            return .failure("Unknown command: \(request.command). Available: list-projects, list-sessions, focus, status, content, fleet-stats, activity")
+            return .failure("Unknown command: \(request.command). Available: list-projects, list-sessions, focus, status, content, fleet-stats, fleet, activity")
         }
     }
 
@@ -1659,6 +1905,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSSplitV
     }
 
     func windowWillClose(_ notification: Notification) {
+        // Flush all buffered events to SQLite before shutdown
+        eventPersister?.flushSync()
         saveState()
         for project in projectStore.projects {
             for session in project.sessions {

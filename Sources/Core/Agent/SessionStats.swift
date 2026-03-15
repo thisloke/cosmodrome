@@ -85,6 +85,13 @@ public final class SessionStats {
         Date().timeIntervalSince(sessionStartedAt)
     }
 
+    /// Cost per minute (nil if uptime < 60s or no cost).
+    public var costPerMinute: Double? {
+        let up = uptime
+        guard up >= 60, totalCost > 0 else { return nil }
+        return totalCost / (up / 60.0)
+    }
+
     // MARK: - Mutations (called from I/O thread)
 
     /// Record a cost update (parsed from agent status line).
@@ -158,6 +165,23 @@ public final class SessionStats {
         }
 
         lock.unlock()
+    }
+
+    // MARK: - Snapshot for persistence
+
+    /// Thread-safe snapshot of all stats for persistence to SQLite.
+    public func snapshot() -> SessionStatsSnapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return SessionStatsSnapshot(
+            totalCost: _totalCost,
+            totalTasks: _totalTasks,
+            totalErrors: _totalErrors,
+            totalFilesChanged: _totalFilesChanged,
+            totalCommands: _totalCommands,
+            totalSubagents: _totalSubagents,
+            totalIdleTime: _totalIdleTime
+        )
     }
 }
 
