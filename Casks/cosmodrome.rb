@@ -1,6 +1,6 @@
 cask "cosmodrome" do
   version "0.3.0"
-  sha256 "PLACEHOLDER_SHA256"
+  sha256 "65d133661ffa11d98669be15fc2ce70390f3daaa7949427952b91da4dbe723c1"
 
   url "https://github.com/rinaldofesta/cosmodrome/releases/download/v#{version}/Cosmodrome.dmg"
   name "Cosmodrome"
