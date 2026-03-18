@@ -67,7 +67,8 @@ final class PTYProcessTests: XCTestCase {
         // Read and feed to backend
         var buffer = [UInt8](repeating: 0, count: 4096)
         let bytesRead = read(result.fd, &buffer, 4096)
-        XCTAssertTrue(bytesRead > 0)
+        XCTAssertTrue(bytesRead > 0, "read() returned \(bytesRead)")
+        guard bytesRead > 0 else { close(result.fd); return }
 
         buffer.withUnsafeBytes { rawBuffer in
             let slice = UnsafeRawBufferPointer(
